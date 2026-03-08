@@ -47,6 +47,11 @@ export class Workspace extends DurableObject<Env> {
       "/",
       (command, options) => this.execInContainer(command, options),
     );
+
+    // Restore container status from live state after hibernation wake
+    if (ctx.container?.running) {
+      this.containerStatus = "running";
+    }
   }
 
   private initSchema(): void {
@@ -138,6 +143,8 @@ export class Workspace extends DurableObject<Env> {
           return this.handleProcessGet(request);
         case "/container/status":
           return json({ status: this.containerStatus });
+        case "/container/stop":
+          return this.handleContainerStop();
         case "/index-invalidate":
           return this.handleIndexInvalidate(request);
         default:
@@ -299,6 +306,26 @@ export class Workspace extends DurableObject<Env> {
     const proc = this.processes.getProcess(pid);
     if (!proc) return json({ error: "Process not found" }, 404);
     return json(proc);
+  }
+
+  // -- Container lifecycle --
+
+  private async handleContainerStop(): Promise<Response> {
+    const container = this.ctx.container;
+    if (!container || !container.running) {
+      this.containerStatus = "stopped";
+      return json({ status: "stopped" });
+    }
+
+    try {
+      // Send SIGTERM — container-agent will snapshot and exit
+      container.signal(15); // SIGTERM
+      this.containerStatus = "sleeping";
+      return json({ status: "stopping" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return json({ error: msg }, 500);
+    }
   }
 
   // -- Container execution --

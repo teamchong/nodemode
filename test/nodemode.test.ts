@@ -379,6 +379,16 @@ describe("nodemode", () => {
     expect(data.refreshed).toBe(0);
   });
 
+  it("handles container stop when not running", async () => {
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/container/stop`,
+      { method: "POST" },
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { status: string };
+    expect(data.status).toBe("stopped");
+  });
+
   it("rejects index invalidation with invalid body", async () => {
     const res = await SELF.fetch(
       `http://localhost/workspace/${workspaceId}/index-invalidate`,
