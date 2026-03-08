@@ -21,12 +21,7 @@ npx wrangler dev
 
 ## Architecture
 
-```
-Client ──WebSocket──▶ Worker ──▶ Durable Object (Workspace)
-                                   ├── SQLite (metadata, process table, cache)
-                                   ├── R2 (file content)
-                                   └── Container (npm, node, heavy commands)
-```
+<img src="docs/public/architecture.svg" alt="nodemode architecture diagram" style="width: 100%; max-width: 900px;" />
 
 Commands are tiered:
 - **Built-in** (cat, ls, grep, echo, pwd, ...) — execute directly in DO, $0 cost, <1ms
