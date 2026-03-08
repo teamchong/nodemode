@@ -16,6 +16,8 @@ export { Workspace } from "./workspace";
 export { FsEngine } from "./fs-engine";
 export { ProcessManager } from "./process-manager";
 export { createHandler } from "./handler";
+export { ValidationError, validatePath, validateCommand } from "./validate";
 export type { Env } from "./env";
 export type { FileStat, DirEntry } from "./fs-engine";
+export type { HandlerOptions } from "./handler";
 export type { SpawnOptions, SpawnResult, ProcessHandle } from "./process-manager";

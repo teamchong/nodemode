@@ -1,14 +1,19 @@
 // createHandler — reusable fetch handler for nodemode
 //
-// Extracts workspace routing into a factory function
-// that can be used from any Cloudflare Worker entry point.
+// Routing:
+//   /workspace/{id}/{action}  → forward to Workspace DO
+//   /api/workspaces            → list workspaces via R2 prefix scan
+//   /api/workspaces/{id}/...   → forward to Workspace DO
 //
-// Usage:
-//   import { Workspace, createHandler } from "nodemode";
-//   export { Workspace };
-//   export default { fetch: createHandler() };
+// Validates workspace IDs and payload sizes at the boundary.
+// All errors are JSON: { error: "..." }
 
 import type { Env } from "./env";
+import {
+  validateWorkspaceId,
+  validatePayloadSize,
+  ValidationError,
+} from "./validate";
 
 const WORKSPACE_ROUTE = /^\/workspace\/([^/]+)\/(.+)$/;
 const API_ROUTE = /^\/api\/workspaces(?:\/([^/]+))?(?:\/(.*))?$/;
@@ -48,6 +53,13 @@ function withCors(response: Response): Response {
   });
 }
 
+function jsonError(message: string, status: number): Response {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 export function createHandler(options: HandlerOptions = {}) {
   const { fallback, cors = true } = options;
 
@@ -59,52 +71,69 @@ export function createHandler(options: HandlerOptions = {}) {
       return new Response(null, { status: 204, headers: corsHeaders() });
     }
 
-    // Workspace routes: /workspace/{id}/{action}
-    const wsMatch = url.pathname.match(WORKSPACE_ROUTE);
-    if (wsMatch) {
-      const [, workspaceId, action] = wsMatch;
-      const workspace = getWorkspace(env, workspaceId);
-      const target = new URL(`/${action}`, request.url);
-      target.search = url.search;
-      const forwarded = new Request(target, request);
-      const response = await workspace.fetch(forwarded);
-      return cors ? withCors(response) : response;
-    }
+    try {
+      // Validate payload size for requests with body
+      if (request.method === "POST" || request.method === "PUT") {
+        validatePayloadSize(request.headers.get("content-length"));
+      }
 
-    // API routes: /api/workspaces/{id?}/{action?}
-    const apiMatch = url.pathname.match(API_ROUTE);
-    if (apiMatch) {
-      const [, workspaceId, action] = apiMatch;
-
-      // List workspaces via R2 prefix scan
-      if (!workspaceId) {
-        const listed = await env.FS_BUCKET.list({ delimiter: "/" });
-        const workspaces = listed.delimitedPrefixes.map((prefix) =>
-          prefix.replace(/\/$/, ""),
-        );
-        const response = new Response(JSON.stringify({ workspaces }), {
-          headers: { "Content-Type": "application/json" },
-        });
+      // Workspace routes: /workspace/{id}/{action}
+      const wsMatch = url.pathname.match(WORKSPACE_ROUTE);
+      if (wsMatch) {
+        const [, workspaceId, action] = wsMatch;
+        validateWorkspaceId(workspaceId);
+        const workspace = getWorkspace(env, workspaceId);
+        const target = new URL(`/${action}`, request.url);
+        target.search = url.search;
+        const forwarded = new Request(target, request);
+        const response = await workspace.fetch(forwarded);
         return cors ? withCors(response) : response;
       }
 
-      // Forward to workspace DO
-      const workspace = getWorkspace(env, workspaceId);
-      const forwarded = new Request(
-        new URL(`/${action || ""}`, request.url),
-        request,
-      );
-      const response = await workspace.fetch(forwarded);
-      return cors ? withCors(response) : response;
-    }
+      // API routes: /api/workspaces/{id?}/{action?}
+      const apiMatch = url.pathname.match(API_ROUTE);
+      if (apiMatch) {
+        const [, workspaceId, action] = apiMatch;
 
-    // Fallback
-    if (fallback) {
-      return fallback(request, env);
-    }
+        // List workspaces via R2 prefix scan
+        if (!workspaceId) {
+          const listed = await env.FS_BUCKET.list({ delimiter: "/" });
+          const workspaces = listed.delimitedPrefixes.map((prefix) =>
+            prefix.replace(/\/$/, ""),
+          );
+          const response = new Response(JSON.stringify({ workspaces }), {
+            headers: { "Content-Type": "application/json" },
+          });
+          return cors ? withCors(response) : response;
+        }
 
-    return new Response("nodemode — Node.js runtime on Cloudflare Workers", {
-      status: 200,
-    });
+        // Forward to workspace DO
+        validateWorkspaceId(workspaceId);
+        const workspace = getWorkspace(env, workspaceId);
+        const forwarded = new Request(
+          new URL(`/${action || ""}`, request.url),
+          request,
+        );
+        const response = await workspace.fetch(forwarded);
+        return cors ? withCors(response) : response;
+      }
+
+      // Fallback
+      if (fallback) {
+        return fallback(request, env);
+      }
+
+      return new Response("nodemode — Node.js runtime on Cloudflare Workers", {
+        status: 200,
+      });
+    } catch (err) {
+      if (err instanceof ValidationError) {
+        const resp = jsonError(err.message, 400);
+        return cors ? withCors(resp) : resp;
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      const resp = jsonError(msg, 500);
+      return cors ? withCors(resp) : resp;
+    }
   };
 }

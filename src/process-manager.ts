@@ -10,6 +10,7 @@
 //   { "allow": ["git", "npm", "node"], "deny": ["sudo", "rm -rf"] }
 
 import type { FsEngine } from "./fs-engine";
+import { validateCommand } from "./validate";
 
 export interface SpawnOptions {
   cwd?: string;
@@ -69,6 +70,7 @@ export class ProcessManager {
   ) {}
 
   async exec(command: string, options: SpawnOptions = {}): Promise<SpawnResult> {
+    validateCommand(command);
     const { cmd, args } = parseCommand(command);
     const effectiveCwd = options.cwd || this.cwd;
 
