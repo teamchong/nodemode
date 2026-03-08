@@ -22,6 +22,7 @@ import { FsEngine } from "./fs-engine";
 import { ProcessManager } from "./process-manager";
 import type { ContainerStatus, ContainerExecResult } from "./container";
 import { validatePath, validateCommand, validatePayloadSize, ValidationError } from "./validate";
+import { setContext } from "./shims/context";
 
 const MAX_TERMINAL_BUFFER_ROWS = 5000;
 const CONTAINER_HEALTH_INTERVAL_MS = 30_000;
@@ -52,6 +53,9 @@ export class Workspace extends DurableObject<Env> {
     if (ctx.container?.running) {
       this.containerStatus = "running";
     }
+
+    // Bind shim context so node:fs and node:child_process aliases work
+    setContext(this.fs, this.processes);
   }
 
   private initSchema(): void {

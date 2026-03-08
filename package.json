@@ -11,6 +11,18 @@
     "./client": {
       "types": "./src/client.ts",
       "default": "./src/client.ts"
+    },
+    "./shims/fs": {
+      "types": "./src/shims/fs.ts",
+      "default": "./src/shims/fs.ts"
+    },
+    "./shims/child_process": {
+      "types": "./src/shims/child_process.ts",
+      "default": "./src/shims/child_process.ts"
+    },
+    "./shims/context": {
+      "types": "./src/shims/context.ts",
+      "default": "./src/shims/context.ts"
     }
   },
   "bin": {

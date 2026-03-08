@@ -22,3 +22,4 @@ export type { FileStat, DirEntry } from "./fs-engine";
 export type { HandlerOptions } from "./handler";
 export type { SpawnOptions, SpawnResult, ProcessHandle, ContainerExecFn } from "./process-manager";
 export type { ContainerStatus, ContainerExecRequest, ContainerExecResult } from "./container";
+export { setContext, clearContext } from "./shims/context";
