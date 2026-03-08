@@ -1,12 +1,12 @@
-// nodemode/client — types and utilities usable outside Cloudflare Workers
+// nodemode/client — SDK and types usable outside Cloudflare Workers
 //
-// Import from "nodemode/client" when you need types and validation
-// without depending on @cloudflare/workers-types.
+// Import from "nodemode/client" for browser/Node.js client code.
 //
 // Usage:
-//   import type { FileStat, SpawnResult } from "nodemode/client";
-//   import { validatePath } from "nodemode/client";
+//   import { NodeMode, listWorkspaces } from "nodemode/client";
+//   import type { SpawnResult, FileStat } from "nodemode/client";
 
+export { NodeMode, listWorkspaces } from "./sdk";
 export { ValidationError, validatePath, validateCommand } from "./validate";
 export type { FileStat, DirEntry } from "./fs-engine";
 export type { SpawnOptions, SpawnResult, ProcessHandle, ContainerExecFn } from "./process-manager";

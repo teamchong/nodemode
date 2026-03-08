@@ -67,7 +67,7 @@ Requires Cloudflare Workers Paid plan (for Durable Objects + R2).
 | Terminal buffer | ~50% | Works but grows unbounded, no rotation/max size |
 | API design | ~60% | Mixed GET/POST for reads, no binary file support, no pagination, no ETag |
 | Workspace lifecycle | ~40% | Container idle timeout + alarm health checks. Missing: workspace deletion, cloning, resource limits |
-| Client SDK | 0% | No TypeScript client library |
+| Client SDK | ~60% | HTTP client (`NodeMode` class) works. Missing: WebSocket streaming helpers, retry/reconnect, auth headers |
 
 ## Docs
 
