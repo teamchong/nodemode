@@ -2,13 +2,13 @@
 
 Proves nodemode can support popular Node.js tools that **require shell + filesystem** — things impossible on vanilla Cloudflare Workers.
 
-## Results: 104 conformance tests passing
+## Results: 168 conformance tests passing
 
 | Tool | Stars | What it needs | Tests | Status |
 |------|-------|---------------|-------|--------|
-| **zx** (Google) | 44k+ | `child_process.spawn`, pipes, exit codes, fs | 21 | PASS |
-| **opencode** (AI agent) | — | fs read/write, exec (git/npm/tsc), project scaffold | 27 | PASS |
-| **simple-git** | 3.5k+ | `spawn("git", ...)`, .git/ fs operations, refs | 20 | PASS |
+| **opencode** (AI agent) | — | fs read/write, exec, refactoring, configs, monorepo | 61 | PASS |
+| **simple-git** | 3.5k+ | .git/ fs, refs, tags, remotes, merge conflicts, large files | 36 | PASS |
+| **zx** (Google) | 44k+ | pipes, chains, exit codes, conditionals, batch ops | 35 | PASS |
 | **create-next-app / create-vite / degit** | 130k+ / 70k+ / 7k+ | mkdir, write templates, npm install | 19 | PASS |
 | **lint-staged / nodemon / esbuild** | 13k+ / 26k+ / — | fs.watch, spawn linters, read imports, write bundles | 17 | PASS |
 
@@ -34,8 +34,8 @@ npx vitest run
 
 ## Test files
 
-- `conformance-zx.test.ts` — Shell scripting patterns ($\`command\`, pipes, chains, env vars)
-- `conformance-opencode.test.ts` — AI coding agent workflow (scaffold → inspect → modify → build)
-- `conformance-simple-git.test.ts` — Git operations (init, refs, branches, diff, stash)
+- `conformance-zx.test.ts` — Shell scripting patterns ($\`command\`, pipes, chains, conditionals, batch ops, process tracking)
+- `conformance-opencode.test.ts` — AI coding agent workflow (scaffold → inspect → modify → build → refactor → error recovery → config → search → monorepo)
+- `conformance-simple-git.test.ts` — Git operations (init, refs, branches, tags, remotes, merge conflicts, large files, diff, stash)
 - `conformance-create-app.test.ts` — Project scaffolding (Next.js, Vite, degit-style clone)
 - `conformance-lint-staged.test.ts` — Dev tooling (lint-staged, nodemon, esbuild bundling)
