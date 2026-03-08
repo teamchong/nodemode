@@ -11,7 +11,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
 import { FsEngine } from "./fs-engine";
 import { ProcessManager } from "./process-manager";
-import { validatePath, validateCommand, ValidationError } from "./validate";
+import { validatePath, validateCommand, validatePayloadSize, ValidationError } from "./validate";
 
 const MAX_TERMINAL_BUFFER_ROWS = 5000;
 
@@ -84,6 +84,11 @@ export class Workspace extends DurableObject<Env> {
     // WebSocket upgrade for stdio streaming
     if (request.headers.get("Upgrade") === "websocket") {
       return this.handleWebSocket(request);
+    }
+
+    // Validate payload size for requests with body
+    if (request.method === "POST" || request.method === "PUT") {
+      validatePayloadSize(request.headers.get("content-length"));
     }
 
     try {
