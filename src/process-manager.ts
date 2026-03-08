@@ -36,6 +36,8 @@ export interface ProcessHandle {
 
 // Commands handled entirely in-DO (no Container needed)
 const MAX_PROCESS_ROWS = 1000;
+const MAX_STORED_OUTPUT = 4096; // Truncate stdout/stderr stored in process table
+const PRUNE_INTERVAL = 50; // Only check prune every N executions
 
 const BUILTIN_COMMANDS = new Set([
   "echo",
@@ -70,6 +72,8 @@ export type ContainerExecFn = (
 ) => Promise<SpawnResult>;
 
 export class ProcessManager {
+  private execCount = 0;
+
   constructor(
     private sql: SqlStorage,
     private fs: FsEngine,
@@ -170,27 +174,27 @@ export class ProcessManager {
         };
       }
 
-      // Record result
+      // Record result (truncate stored output to save SQLite space)
       this.sql.exec(
         "UPDATE processes SET status = 'done', exit_code = ?, stdout = ?, stderr = ?, finished_at = ? WHERE pid = ?",
         result.exitCode,
-        result.stdout,
-        result.stderr,
+        result.stdout.slice(0, MAX_STORED_OUTPUT),
+        result.stderr.slice(0, MAX_STORED_OUTPUT),
         Date.now(),
         pid,
       );
 
-      this.pruneProcessTable();
+      if (++this.execCount % PRUNE_INTERVAL === 0) this.pruneProcessTable();
       return result;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.sql.exec(
         "UPDATE processes SET status = 'error', exit_code = 1, stderr = ?, finished_at = ? WHERE pid = ?",
-        msg,
+        msg.slice(0, MAX_STORED_OUTPUT),
         Date.now(),
         pid,
       );
-      this.pruneProcessTable();
+      if (++this.execCount % PRUNE_INTERVAL === 0) this.pruneProcessTable();
       return { exitCode: 1, stdout: "", stderr: msg };
     }
   }
@@ -231,7 +235,7 @@ export class ProcessManager {
   listProcesses(): ProcessHandle[] {
     return this.sql
       .exec(
-        "SELECT pid, command, status, exit_code, stdout, stderr FROM processes ORDER BY pid DESC LIMIT 100",
+        "SELECT pid, command, status, exit_code FROM processes ORDER BY pid DESC LIMIT 100",
       )
       .toArray()
       .map((row) => ({
@@ -239,8 +243,8 @@ export class ProcessManager {
         command: row.command as string,
         status: row.status as ProcessHandle["status"],
         exitCode: row.exit_code as number | null,
-        stdout: (row.stdout as string) || "",
-        stderr: (row.stderr as string) || "",
+        stdout: "",
+        stderr: "",
       }));
   }
 

@@ -98,6 +98,9 @@ export class Workspace extends DurableObject<Env> {
         data TEXT NOT NULL,
         timestamp INTEGER NOT NULL
       );
+
+      CREATE INDEX IF NOT EXISTS idx_files_path ON files (path);
+      CREATE INDEX IF NOT EXISTS idx_file_cache_cached_at ON file_cache (cached_at);
     `);
   }
 
