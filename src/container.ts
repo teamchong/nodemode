@@ -11,12 +11,6 @@
 
 export type ContainerStatus = "stopped" | "starting" | "running" | "sleeping" | "crashed";
 
-export interface ContainerExecRequest {
-  command: string;
-  cwd?: string;
-  env?: Record<string, string>;
-}
-
 export interface ContainerExecResult {
   exitCode: number;
   stdout: string;

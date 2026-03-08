@@ -397,19 +397,6 @@ export class FsEngine {
     }
   }
 
-  // -- Bulk operations --
-
-  async listAllFiles(prefix: string = ""): Promise<string[]> {
-    const normalized = prefix ? normalizePath(prefix) : "";
-    const rows = this.sql
-      .exec(
-        "SELECT path FROM files WHERE is_dir = 0 AND path LIKE ? || '%'",
-        normalized,
-      )
-      .toArray();
-    return rows.map((r) => r.path as string);
-  }
-
   // -- Internal helpers --
 
   private r2Key(normalizedPath: string): string {

@@ -282,9 +282,8 @@ export class ProcessManager {
       case "ls":
         return this.builtinLs(args, cwd);
       case "head":
-        return this.builtinHead(args, cwd, options);
       case "tail":
-        return this.builtinTail(args, cwd, options);
+        return this.builtinHeadTail(cmd as "head" | "tail", args, cwd, options);
       case "wc":
         return this.builtinWc(args, cwd, options);
       case "grep":
@@ -376,7 +375,7 @@ export class ProcessManager {
     return ok(filtered.map((e) => e.name).join("\n") + "\n");
   }
 
-  private async builtinHead(args: string[], cwd: string, options?: SpawnOptions): Promise<SpawnResult> {
+  private async builtinHeadTail(cmd: "head" | "tail", args: string[], cwd: string, options?: SpawnOptions): Promise<SpawnResult> {
     let lines = 10;
     const files: string[] = [];
     for (let i = 0; i < args.length; i++) {
@@ -390,31 +389,7 @@ export class ProcessManager {
     if (files.length > 0) {
       const path = resolvePath(cwd, files[0]);
       const fileContent = await this.fs.readFileText(path);
-      if (fileContent === null) return fail(`head: ${files[0]}: No such file or directory\n`);
-      content = fileContent;
-    } else if (options?.stdin) {
-      content = options.stdin;
-    } else {
-      return ok("");
-    }
-    return ok(content.split("\n").slice(0, lines).join("\n") + "\n");
-  }
-
-  private async builtinTail(args: string[], cwd: string, options?: SpawnOptions): Promise<SpawnResult> {
-    let lines = 10;
-    const files: string[] = [];
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === "-n" && args[i + 1]) {
-        lines = parseInt(args[++i], 10);
-      } else if (!args[i].startsWith("-")) {
-        files.push(args[i]);
-      }
-    }
-    let content: string;
-    if (files.length > 0) {
-      const path = resolvePath(cwd, files[0]);
-      const fileContent = await this.fs.readFileText(path);
-      if (fileContent === null) return fail(`tail: ${files[0]}: No such file or directory\n`);
+      if (fileContent === null) return fail(`${cmd}: ${files[0]}: No such file or directory\n`);
       content = fileContent;
     } else if (options?.stdin) {
       content = options.stdin;
@@ -424,7 +399,8 @@ export class ProcessManager {
     const allLines = content.endsWith("\n")
       ? content.slice(0, -1).split("\n")
       : content.split("\n");
-    return ok(allLines.slice(-lines).join("\n") + "\n");
+    const sliced = cmd === "head" ? allLines.slice(0, lines) : allLines.slice(-lines);
+    return ok(sliced.join("\n") + "\n");
   }
 
   private async builtinWc(args: string[], cwd: string, options?: SpawnOptions): Promise<SpawnResult> {
