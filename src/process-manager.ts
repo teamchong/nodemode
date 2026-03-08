@@ -420,7 +420,9 @@ export class ProcessManager {
     } else {
       return ok("");
     }
-    const allLines = content.split("\n");
+    const allLines = content.endsWith("\n")
+      ? content.slice(0, -1).split("\n")
+      : content.split("\n");
     return ok(allLines.slice(-lines).join("\n") + "\n");
   }
 
