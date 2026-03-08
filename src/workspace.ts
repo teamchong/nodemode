@@ -494,32 +494,43 @@ export class Workspace extends DurableObject<Env> {
 
   private async reconcileIndex(): Promise<void> {
     const prefix = `${this.workspaceId}/`;
-    const listed = await this.env.FS_BUCKET.list({ prefix, limit: 1000 });
-
     const r2Paths = new Set<string>();
-    for (const obj of listed.objects) {
-      const path = obj.key.slice(prefix.length);
-      if (!path) continue;
-      r2Paths.add(path);
 
-      // Check if index entry is stale
-      const rows = this.sql
-        .exec("SELECT size, mtime FROM files WHERE path = ?", path)
-        .toArray();
+    // Paginate through all R2 objects for this workspace
+    let cursor: string | undefined;
+    do {
+      const listed = await this.env.FS_BUCKET.list({
+        prefix,
+        limit: 1000,
+        cursor,
+      });
 
-      if (rows.length === 0 || (rows[0].size as number) !== obj.size) {
-        this.sql.exec(
-          `INSERT OR REPLACE INTO files (path, r2_key, size, mtime, is_dir)
-           VALUES (?, ?, ?, ?, 0)`,
-          path,
-          obj.key,
-          obj.size,
-          Date.now(),
-        );
-        // Invalidate stale cache
-        this.sql.exec("DELETE FROM file_cache WHERE path = ?", path);
+      for (const obj of listed.objects) {
+        const path = obj.key.slice(prefix.length);
+        if (!path) continue;
+        r2Paths.add(path);
+
+        // Check if index entry is stale
+        const rows = this.sql
+          .exec("SELECT size, mtime FROM files WHERE path = ?", path)
+          .toArray();
+
+        if (rows.length === 0 || (rows[0].size as number) !== obj.size) {
+          this.sql.exec(
+            `INSERT OR REPLACE INTO files (path, r2_key, size, mtime, is_dir)
+             VALUES (?, ?, ?, ?, 0)`,
+            path,
+            obj.key,
+            obj.size,
+            Date.now(),
+          );
+          // Invalidate stale cache
+          this.sql.exec("DELETE FROM file_cache WHERE path = ?", path);
+        }
       }
-    }
+
+      cursor = listed.truncated ? listed.cursor : undefined;
+    } while (cursor);
 
     // Remove index entries for files no longer in R2
     const indexed = this.sql
