@@ -25,7 +25,7 @@ import { validatePath, validateCommand, validatePayloadSize, ValidationError } f
 
 const MAX_TERMINAL_BUFFER_ROWS = 5000;
 const CONTAINER_HEALTH_INTERVAL_MS = 30_000;
-const CONTAINER_EXEC_TIMEOUT_MS = 300_000; // 5 minutes
+const CONTAINER_EXEC_TIMEOUT_MS = 300_000;
 
 export class Workspace extends DurableObject<Env> {
   private sql: SqlStorage;
@@ -320,14 +320,25 @@ export class Workspace extends DurableObject<Env> {
     if (this.containerStatus !== "running") {
       this.containerStatus = "starting";
       try {
+        // Pass workspace ID and R2 credentials for snapshot upload/restore
+        const containerEnv: Record<string, string> = {
+          WORKSPACE_ID: this.workspaceId,
+        };
+        // R2 credentials are optional — snapshots disabled without them
+        if (this.env.R2_ENDPOINT) containerEnv.R2_ENDPOINT = this.env.R2_ENDPOINT;
+        if (this.env.R2_ACCESS_KEY) containerEnv.R2_ACCESS_KEY = this.env.R2_ACCESS_KEY;
+        if (this.env.R2_SECRET_KEY) containerEnv.R2_SECRET_KEY = this.env.R2_SECRET_KEY;
+
         container.start({
           enableInternet: true,
-          env: {
-            WORKSPACE_ID: this.workspaceId,
-          },
+          env: containerEnv,
         });
         await container.monitor();
         this.containerStatus = "running";
+
+        // Set inactivity timeout (10 min idle → container sleeps)
+        await container.setInactivityTimeout(10 * 60 * 1000);
+
         // Start health check alarm
         await this.ctx.storage.setAlarm(Date.now() + CONTAINER_HEALTH_INTERVAL_MS);
       } catch (err) {
@@ -337,9 +348,12 @@ export class Workspace extends DurableObject<Env> {
       }
     }
 
-    // Execute command via container-agent
+    // Execute command via container-agent with timeout
     const fetcher = container.getTcpPort(8080);
     try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), CONTAINER_EXEC_TIMEOUT_MS);
+
       const response = await fetcher.fetch("http://container/exec", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -348,7 +362,10 @@ export class Workspace extends DurableObject<Env> {
           cwd: options.cwd || "/workspace",
           env: options.env,
         }),
+        signal: controller.signal,
       });
+
+      clearTimeout(timer);
 
       if (!response.ok) {
         const text = await response.text();
@@ -358,6 +375,9 @@ export class Workspace extends DurableObject<Env> {
       return (await response.json()) as ContainerExecResult;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("abort")) {
+        return { exitCode: 124, stdout: "", stderr: `Command timed out after ${CONTAINER_EXEC_TIMEOUT_MS / 1000}s` };
+      }
       return { exitCode: 1, stdout: "", stderr: `Container exec failed: ${msg}` };
     }
   }

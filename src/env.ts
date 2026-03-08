@@ -7,4 +7,9 @@
 export interface Env {
   FS_BUCKET: R2Bucket;
   WORKSPACE: DurableObjectNamespace;
+
+  // Optional: R2 S3-compatible credentials for container snapshot upload/restore
+  R2_ENDPOINT?: string;
+  R2_ACCESS_KEY?: string;
+  R2_SECRET_KEY?: string;
 }
