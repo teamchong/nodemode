@@ -70,7 +70,7 @@ export function validateWorkspaceId(id: string): void {
 }
 
 export function validateCommand(command: string): void {
-  if (!command || command.length === 0) {
+  if (!command) {
     throw new ValidationError("Empty command", "EINVAL");
   }
   if (command.length > MAX_COMMAND_LENGTH) {

@@ -349,8 +349,9 @@ export class ProcessManager {
   }
 
   private builtinLs(args: string[], cwd: string): SpawnResult {
-    const longFormat = args.includes("-l") || args.includes("-la") || args.includes("-al");
-    const showAll = args.includes("-a") || args.includes("-la") || args.includes("-al");
+    const flags = args.filter((a) => a.startsWith("-")).join("");
+    const longFormat = flags.includes("l");
+    const showAll = flags.includes("a");
     const paths = args.filter((a) => !a.startsWith("-"));
     const dir = paths[0] ? resolvePath(cwd, paths[0]) : cwd;
 
@@ -499,12 +500,17 @@ export class ProcessManager {
   }
 
   private async builtinRm(args: string[], cwd: string): Promise<SpawnResult> {
-    const recursive = args.includes("-r") || args.includes("-rf") || args.includes("-fr");
+    const flags = args.filter((a) => a.startsWith("-")).join("");
+    const recursive = flags.includes("r");
+    const force = flags.includes("f");
     const files = args.filter((a) => !a.startsWith("-"));
     for (const file of files) {
       const path = resolvePath(cwd, file);
       const stat = this.fs.stat(path);
-      if (!stat) return fail(`rm: ${file}: No such file or directory\n`);
+      if (!stat) {
+        if (force) continue;
+        return fail(`rm: ${file}: No such file or directory\n`);
+      }
       if (stat.isDirectory) {
         await this.fs.rmdir(path, recursive);
       } else {

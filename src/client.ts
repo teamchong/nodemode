@@ -9,6 +9,5 @@
 export { NodeMode, listWorkspaces } from "./sdk";
 export { ValidationError, validatePath, validateCommand } from "./validate";
 export type { FileStat, DirEntry } from "./fs-engine";
-export type { SpawnOptions, SpawnResult, ProcessHandle, ContainerExecFn } from "./process-manager";
-export type { HandlerOptions } from "./handler";
-export type { ContainerStatus, ContainerExecRequest, ContainerExecResult } from "./container";
+export type { SpawnResult, ProcessHandle } from "./process-manager";
+export type { ContainerStatus } from "./container";

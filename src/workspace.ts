@@ -21,7 +21,7 @@ import type { Env } from "./env";
 import { FsEngine } from "./fs-engine";
 import { ProcessManager } from "./process-manager";
 import type { ContainerStatus, ContainerExecResult } from "./container";
-import { validatePath, validateCommand, validatePayloadSize, ValidationError } from "./validate";
+import { validatePath, validateCommand, ValidationError } from "./validate";
 import { setContext } from "./shims/context";
 
 const MAX_TERMINAL_BUFFER_ROWS = 5000;
@@ -103,7 +103,6 @@ export class Workspace extends DurableObject<Env> {
         timestamp INTEGER NOT NULL
       );
 
-      CREATE INDEX IF NOT EXISTS idx_files_path ON files (path);
       CREATE INDEX IF NOT EXISTS idx_file_cache_cached_at ON file_cache (cached_at);
     `);
   }
@@ -115,11 +114,6 @@ export class Workspace extends DurableObject<Env> {
     // WebSocket upgrade for stdio streaming
     if (request.headers.get("Upgrade") === "websocket") {
       return this.handleWebSocket(request);
-    }
-
-    // Validate payload size for requests with body
-    if (request.method === "POST" || request.method === "PUT") {
-      validatePayloadSize(request.headers.get("content-length"));
     }
 
     try {
@@ -436,12 +430,15 @@ export class Workspace extends DurableObject<Env> {
         const head = await this.env.FS_BUCKET.head(r2Key);
         if (head) {
           // Update or insert index entry
+          const existing = this.sql.exec("SELECT mode FROM files WHERE path = ?", path).toArray();
+          const mode = existing.length > 0 ? (existing[0].mode as number) : 0o644;
           this.sql.exec(
-            `INSERT OR REPLACE INTO files (path, r2_key, size, mtime, is_dir)
-             VALUES (?, ?, ?, ?, 0)`,
+            `INSERT OR REPLACE INTO files (path, r2_key, size, mode, mtime, is_dir)
+             VALUES (?, ?, ?, ?, ?, 0)`,
             path,
             r2Key,
             head.size,
+            mode,
             Date.now(),
           );
           // Invalidate file cache
@@ -519,16 +516,18 @@ export class Workspace extends DurableObject<Env> {
 
         // Check if index entry is stale
         const rows = this.sql
-          .exec("SELECT size, mtime FROM files WHERE path = ?", path)
+          .exec("SELECT size, mode FROM files WHERE path = ?", path)
           .toArray();
 
         if (rows.length === 0 || (rows[0].size as number) !== obj.size) {
+          const mode = rows.length > 0 ? (rows[0].mode as number) : 0o644;
           this.sql.exec(
-            `INSERT OR REPLACE INTO files (path, r2_key, size, mtime, is_dir)
-             VALUES (?, ?, ?, ?, 0)`,
+            `INSERT OR REPLACE INTO files (path, r2_key, size, mode, mtime, is_dir)
+             VALUES (?, ?, ?, ?, ?, 0)`,
             path,
             obj.key,
             obj.size,
+            mode,
             Date.now(),
           );
           // Invalidate stale cache
