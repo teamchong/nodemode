@@ -1,8 +1,8 @@
 // container-agent — HTTP server running inside the Cloudflare Container
 //
 // Handles:
-//   POST /exec        — spawn child process, return stdout/stderr
-//   GET  /healthz     — liveness check
+//   POST /exec          — spawn child process, return stdout/stderr
+//   GET  /healthz       — liveness check
 //   POST /sync/snapshot — trigger manual snapshot
 //
 // Boot sequence:
@@ -16,7 +16,7 @@
 
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, symlinkSync, readlinkSync } from "node:fs";
+import { existsSync, mkdirSync, symlinkSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const PORT = 8080;
@@ -25,53 +25,133 @@ const FUSE_MOUNT = "/mnt/workspace";
 const LOCAL_DIR = "/local";
 
 // Directories that stay on local disk (fast, ephemeral)
-const LOCAL_DIRS = ["node_modules", "dist", ".npm", ".next", "build"];
+const LOCAL_DIRS = new Set(["node_modules", "dist", ".npm", ".next", "build"]);
 
-// Source directories symlinked from R2 FUSE mount
-const SOURCE_PATTERNS = ["src", "lib", "app", "pages", "public", "styles"];
+// Directories to snapshot on SIGTERM and restore on boot
+const SNAPSHOT_DIRS = ["node_modules", "dist"];
 
 function setupWorkspace() {
-  // Create directories
   mkdirSync(WORKSPACE_DIR, { recursive: true });
   mkdirSync(LOCAL_DIR, { recursive: true });
 
-  // Create local dirs for build artifacts
+  // Create local dirs for build artifacts and symlink into workspace
   for (const dir of LOCAL_DIRS) {
     const localPath = join(LOCAL_DIR, dir);
     const wsPath = join(WORKSPACE_DIR, dir);
     mkdirSync(localPath, { recursive: true });
-
-    // Symlink workspace/node_modules -> /local/node_modules
     if (!existsSync(wsPath)) {
       try {
         symlinkSync(localPath, wsPath);
       } catch {
-        // Already exists or mount issue
+        // Already exists or permission issue
       }
     }
   }
 
-  // Symlink source dirs from R2 FUSE mount if available
+  // Symlink source files/dirs from R2 FUSE mount into workspace
   if (existsSync(FUSE_MOUNT)) {
-    // Symlink individual files/dirs from FUSE mount into workspace
-    // Skip local dirs that we manage ourselves
-    const localDirSet = new Set(LOCAL_DIRS);
     try {
-      const { readdirSync } = await import("node:fs");
       for (const entry of readdirSync(FUSE_MOUNT)) {
-        if (localDirSet.has(entry)) continue;
+        if (LOCAL_DIRS.has(entry)) continue;
         const src = join(FUSE_MOUNT, entry);
         const dst = join(WORKSPACE_DIR, entry);
         if (!existsSync(dst)) {
           try {
             symlinkSync(src, dst);
           } catch {
-            // Skip if can't symlink
+            // Skip entries that can't be symlinked
           }
         }
       }
     } catch {
-      // FUSE mount may not be ready yet
+      // FUSE mount may not be populated yet
+    }
+  }
+}
+
+async function restoreSnapshots() {
+  const workspaceId = process.env.WORKSPACE_ID;
+  const r2Endpoint = process.env.R2_ENDPOINT;
+  const r2AccessKey = process.env.R2_ACCESS_KEY;
+  const r2SecretKey = process.env.R2_SECRET_KEY;
+
+  if (!workspaceId || !r2Endpoint || !r2AccessKey || !r2SecretKey) return;
+
+  for (const dir of SNAPSHOT_DIRS) {
+    const localPath = join(LOCAL_DIR, dir);
+    // Skip if directory already has content (e.g. from a previous restore)
+    try {
+      if (readdirSync(localPath).length > 0) continue;
+    } catch {
+      continue;
+    }
+
+    const snapshotKey = `${workspaceId}/.snapshots/${dir}.tar.zst`;
+    console.log(`[agent] restoring ${dir} from ${snapshotKey}...`);
+
+    try {
+      const { exitCode, stderr } = await execCommand(
+        `curl -sf "${r2Endpoint}/${snapshotKey}" ` +
+        `--aws-sigv4 "aws:amz:auto:s3" ` +
+        `--user "${r2AccessKey}:${r2SecretKey}" ` +
+        `| zstd -d | tar -xf - -C /local`,
+        "/",
+        {},
+      );
+      if (exitCode === 0) {
+        console.log(`[agent] restored ${dir}`);
+      } else {
+        // 404 or download error — not fatal, user will npm install
+        console.log(`[agent] no snapshot for ${dir} (${stderr.trim() || "not found"})`);
+      }
+    } catch {
+      console.log(`[agent] snapshot restore skipped for ${dir}`);
+    }
+  }
+}
+
+async function createSnapshots() {
+  const workspaceId = process.env.WORKSPACE_ID;
+  const r2Endpoint = process.env.R2_ENDPOINT;
+  const r2AccessKey = process.env.R2_ACCESS_KEY;
+  const r2SecretKey = process.env.R2_SECRET_KEY;
+
+  if (!workspaceId || !r2Endpoint || !r2AccessKey || !r2SecretKey) {
+    console.log("[agent] skipping snapshots (no R2 credentials)");
+    return;
+  }
+
+  for (const dir of SNAPSHOT_DIRS) {
+    const dirPath = join(LOCAL_DIR, dir);
+    if (!existsSync(dirPath)) continue;
+    // Skip empty directories
+    try {
+      if (readdirSync(dirPath).length === 0) continue;
+    } catch {
+      continue;
+    }
+
+    const snapshotKey = `${workspaceId}/.snapshots/${dir}.tar.zst`;
+    console.log(`[agent] snapshotting ${dir} -> ${snapshotKey}`);
+
+    try {
+      const { exitCode } = await execCommand(
+        `tar -cf - -C /local ${dir} | zstd -1 -T0 | ` +
+        `curl -s -X PUT "${r2Endpoint}/${snapshotKey}" ` +
+        `--aws-sigv4 "aws:amz:auto:s3" ` +
+        `--user "${r2AccessKey}:${r2SecretKey}" ` +
+        `-H "Content-Type: application/octet-stream" ` +
+        `--data-binary @-`,
+        "/",
+        {},
+      );
+      if (exitCode === 0) {
+        console.log(`[agent] snapshot ${dir} uploaded`);
+      } else {
+        console.error(`[agent] snapshot ${dir} upload failed`);
+      }
+    } catch (err) {
+      console.error(`[agent] snapshot ${dir} failed: ${err.message}`);
     }
   }
 }
@@ -100,11 +180,7 @@ function execCommand(command, cwd, env) {
     });
 
     proc.on("error", (err) => {
-      resolve({
-        exitCode: 1,
-        stdout: "",
-        stderr: err.message,
-      });
+      resolve({ exitCode: 1, stdout: "", stderr: err.message });
     });
   });
 }
@@ -121,14 +197,12 @@ function readBody(req) {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
-  // Health check
   if (url.pathname === "/healthz" && req.method === "GET") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ status: "ok", uptime: process.uptime() }));
     return;
   }
 
-  // Execute command
   if (url.pathname === "/exec" && req.method === "POST") {
     try {
       const body = JSON.parse(await readBody(req));
@@ -150,11 +224,15 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // Manual snapshot trigger
   if (url.pathname === "/sync/snapshot" && req.method === "POST") {
-    // Snapshot logic will be called on SIGTERM; this endpoint is for manual triggers
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ status: "snapshot not yet implemented" }));
+    try {
+      await createSnapshots();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "snapshots created" }));
+    } catch (err) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: err.message }));
+    }
     return;
   }
 
@@ -162,50 +240,13 @@ const server = createServer(async (req, res) => {
   res.end(JSON.stringify({ error: "not found" }));
 });
 
-// SIGTERM handler: snapshot build artifacts to R2
+// SIGTERM: snapshot build artifacts to R2, then exit
 let shutdownInProgress = false;
 async function gracefulShutdown() {
   if (shutdownInProgress) return;
   shutdownInProgress = true;
-
   console.log("[agent] SIGTERM received, creating snapshots...");
-
-  // Snapshot node_modules and dist to R2 via tar + zstd
-  // In production, this uploads tar.zst to R2 via S3-compatible API
-  // using WORKSPACE_ID and R2 credentials from env vars
-  const workspaceId = process.env.WORKSPACE_ID || "unknown";
-  for (const dir of ["node_modules", "dist"]) {
-    const dirPath = join(LOCAL_DIR, dir);
-    if (!existsSync(dirPath)) continue;
-
-    const snapshotKey = `${workspaceId}/.snapshots/${dir}.tar.zst`;
-    console.log(`[agent] snapshotting ${dir} -> ${snapshotKey}`);
-
-    // Use tar + zstd to compress, then upload via curl to R2
-    // R2 credentials provided via WORKSPACE_ID, R2_ENDPOINT, R2_ACCESS_KEY, R2_SECRET_KEY env vars
-    const r2Endpoint = process.env.R2_ENDPOINT;
-    const r2AccessKey = process.env.R2_ACCESS_KEY;
-    const r2SecretKey = process.env.R2_SECRET_KEY;
-
-    if (r2Endpoint && r2AccessKey && r2SecretKey) {
-      try {
-        await execCommand(
-          `tar -cf - -C /local ${dir} | zstd -1 -T0 | ` +
-          `curl -s -X PUT "${r2Endpoint}/${snapshotKey}" ` +
-          `--aws-sigv4 "aws:amz:auto:s3" ` +
-          `--user "${r2AccessKey}:${r2SecretKey}" ` +
-          `-H "Content-Type: application/octet-stream" ` +
-          `--data-binary @-`,
-          "/",
-          {},
-        );
-        console.log(`[agent] snapshot ${dir} uploaded`);
-      } catch (err) {
-        console.error(`[agent] snapshot ${dir} failed: ${err.message}`);
-      }
-    }
-  }
-
+  await createSnapshots();
   console.log("[agent] shutdown complete");
   process.exit(0);
 }
@@ -217,6 +258,9 @@ process.on("SIGINT", gracefulShutdown);
 console.log("[agent] setting up workspace...");
 setupWorkspace();
 
-server.listen(PORT, () => {
-  console.log(`[agent] listening on :${PORT}`);
+console.log("[agent] restoring snapshots...");
+restoreSnapshots().then(() => {
+  server.listen(PORT, () => {
+    console.log(`[agent] listening on :${PORT}`);
+  });
 });

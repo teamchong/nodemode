@@ -310,4 +310,84 @@ describe("nodemode", () => {
     const data = (await res.json()) as { workspaces: string[] };
     expect(Array.isArray(data.workspaces)).toBe(true);
   });
+
+  // -- Container integration tests (no real container in vitest) --
+
+  it("returns container status", async () => {
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/container/status`,
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { status: string };
+    expect(data.status).toBe("stopped");
+  });
+
+  it("non-builtin command falls back gracefully without container", async () => {
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/exec`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: "node --version" }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const result = (await res.json()) as {
+      exitCode: number;
+      stderr: string;
+    };
+    expect(result.exitCode).toBe(127);
+    expect(result.stderr).toContain("command not found");
+    expect(result.stderr).toContain("node");
+  });
+
+  it("handles index invalidation with valid paths", async () => {
+    // Write a file first so it exists in R2
+    await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/fs/write`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: "sync-test.txt", content: "synced" }),
+      },
+    );
+
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/index-invalidate`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths: ["sync-test.txt"] }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { refreshed: number };
+    expect(data.refreshed).toBe(1);
+  });
+
+  it("handles index invalidation with non-existent paths", async () => {
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/index-invalidate`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths: ["no-such-file.txt"] }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { refreshed: number };
+    expect(data.refreshed).toBe(0);
+  });
+
+  it("rejects index invalidation with invalid body", async () => {
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/index-invalidate`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths: "not-an-array" }),
+      },
+    );
+    expect(res.status).toBe(400);
+  });
 });

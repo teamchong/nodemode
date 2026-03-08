@@ -238,25 +238,25 @@ Rejected because:
 Symlinks give us exactly the right behavior: source file writes go through to R2,
 build artifact writes stay on fast local disk.
 
-## Container Components
+## Container Components (Implemented)
 
 ### 1. Wrangler Configuration
 
+Container is embedded on the Workspace DO via `ctx.container`:
+
 ```jsonc
-// wrangler.jsonc additions
+// wrangler.jsonc
 {
-  "containers": [
-    {
-      "class_name": "WorkspaceContainer",
-      "image": "./container/Dockerfile",
-      "max_instances": 10,
-      "instance_type": "basic"  // 1 GiB RAM
-    }
-  ],
   "durable_objects": {
     "bindings": [
-      { "name": "WORKSPACE", "class_name": "Workspace" },
-      { "name": "WORKSPACE_CONTAINER", "class_name": "WorkspaceContainer" }
+      {
+        "name": "WORKSPACE",
+        "class_name": "Workspace",
+        "container": {
+          "image": "./container/Dockerfile",
+          "max_instances": 10
+        }
+      }
     ]
   },
   "r2_buckets": [
@@ -265,77 +265,62 @@ build artifact writes stay on fast local disk.
 }
 ```
 
-### 2. WorkspaceContainer Class (DO side)
+### 2. Container Access (ctx.container on DO)
+
+No separate Container class needed. The container is available as
+`this.ctx.container` on the Workspace DO:
 
 ```typescript
-import { Container } from "@cloudflare/containers";
-
-export class WorkspaceContainer extends Container {
-  defaultPort = 8080;
-  sleepAfter = "10m";
-
-  onStart() {
-    // Container is up, port 8080 ready
-    // Record status in SQLite
-  }
-
-  onStop(status: { reason: string; exitCode: number }) {
-    // Container going down
-    // Snapshot was already uploaded by container-agent's SIGTERM handler
-  }
-
-  onError(error: unknown) {
-    // Container crashed — no snapshot
-    // Source files safe in R2, build artifacts lost
-  }
+// ctx.container API (from @cloudflare/workers-types)
+interface Container {
+  get running(): boolean;
+  start(options?: ContainerStartupOptions): void;
+  monitor(): Promise<void>;
+  destroy(error?: any): Promise<void>;
+  signal(signo: number): void;
+  getTcpPort(port: number): Fetcher;
+  setInactivityTimeout(durationMs: number | bigint): Promise<void>;
 }
 ```
 
 ### 3. Workspace DO Orchestration
 
-```typescript
-// In Workspace DO — deciding where to run a command
-async exec(command: string, options: SpawnOptions): Promise<SpawnResult> {
-  const { cmd } = parseCommand(command);
+ProcessManager accepts a `containerExec` callback. Non-builtin commands
+are routed to the container via `ctx.container.getTcpPort(8080).fetch()`:
 
-  if (BUILTIN_COMMANDS.has(cmd)) {
-    // Tier 1: run in DO directly ($0, <1ms)
-    return this.processes.execBuiltin(cmd, args, options);
+```typescript
+// In Workspace constructor
+this.processes = new ProcessManager(
+  this.sql, this.fs, "/",
+  (command, options) => this.execInContainer(command, options),
+);
+
+// Container execution
+async execInContainer(command, options): Promise<ContainerExecResult> {
+  const container = this.ctx.container;
+  if (!container) return { exitCode: 127, stdout: "", stderr: "..." };
+
+  if (!container.running) {
+    container.start({ enableInternet: true, env: { WORKSPACE_ID: this.workspaceId } });
+    await container.monitor();
   }
 
-  // Tier 2: run in Container
-  return this.execInContainer(command, options);
-}
-
-async execInContainer(command: string, options: SpawnOptions): Promise<SpawnResult> {
-  const containerId = this.env.WORKSPACE_CONTAINER.idFromName(this.workspaceId);
-  const container = this.env.WORKSPACE_CONTAINER.get(containerId);
-
-  // Start if not running (startAndWaitForPorts handles idempotency)
-  await container.startAndWaitForPorts({
-    ports: [8080],
-    startOptions: {
-      envVars: {
-        WORKSPACE_ID: this.workspaceId,
-        R2_ENDPOINT: "...",
-        R2_ACCESS_KEY: "...",
-        R2_SECRET_KEY: "...",
-      },
-    },
+  const fetcher = container.getTcpPort(8080);
+  const response = await fetcher.fetch("http://container/exec", {
+    method: "POST",
+    body: JSON.stringify({ command, cwd: options.cwd || "/workspace" }),
   });
+  return await response.json();
+}
+```
 
-  // Execute command in Container
-  const response = await container.fetch(
-    new Request("http://container.internal/exec", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ command, cwd: options.cwd || "/workspace" }),
-    })
-  );
+### 4. Health Check + Index Reconciliation via Alarm
 
-  // Stream response back
-  const result = await response.json();
-  return result as SpawnResult;
+```typescript
+async alarm(): Promise<void> {
+  // Check container health via /healthz
+  // Reconcile SQLite index with R2 list (catches FUSE-written files)
+  // Schedule next alarm in 30s
 }
 ```
 
@@ -459,11 +444,12 @@ training/inference inside workspace Containers.
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Container API | `@cloudflare/containers` (high-level) | Cleaner lifecycle hooks, `startAndWaitForPorts()`, matches claude-agent-sdk-cloudflare pattern in sibling repo |
+| Container API | `ctx.container` (built-in DO property) | Native API, no separate Container DO class needed. start/monitor/getTcpPort pattern. |
 | File sync | R2 FUSE mount + local symlinks | No custom sync protocol for source files. Build artifacts stay local for speed. |
 | Overlay vs symlinks | Symlinks | Transparent, debuggable. Overlay copy-up breaks R2 write-through for source files. |
 | Snapshot format | tar.zst to R2 | Good compression ratio, fast decompression, single R2 object instead of thousands |
-| Index consistency | Lazy refresh → event-driven → periodic reconciliation | Phased approach: lazy is correct and sufficient, add event-driven when latency matters, add periodic for edge cases. |
-| Sandbox SDK vs raw Containers | Raw Containers | Need custom sync logic (tiered files, snapshots), compose with gitmode/pymode at DO level, full control over lifecycle |
-| Instance type | basic (1 GiB) | Sufficient for npm install, node, and standard dev tasks. Upgrade to standard for heavy builds. |
-| sleepAfter | 10m | Balance between cost ($0 when sleeping) and cold start avoidance (2-5s with snapshot restore) |
+| Index consistency | All three from day one | Lazy refresh + event-driven invalidation + periodic reconciliation via alarm. Each is independent and lightweight. |
+| Index writer | DO is sole writer | Container never writes to SQLite. Sends invalidation requests. Inspired by querymode MasterDO pattern. |
+| Container health | DO alarm every 30s | healthz ping + R2 list reconciliation. Catches crashed containers and stale indexes. |
+| Non-builtin routing | ContainerExecFn callback | ProcessManager accepts a callback for container execution. Clean separation; testable without container. |
+| Snapshot restore | On boot before listening | container-agent restores tar.zst from R2 before starting HTTP server. Fast restore (2-5s). |
