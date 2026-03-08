@@ -108,9 +108,13 @@ export function rmdir(path: string, optionsOrCb?: { recursive?: boolean } | Call
 
 export function rm(path: string, optionsOrCb?: { recursive?: boolean; force?: boolean } | Callback<void>, cb?: Callback<void>): void {
   const callback = typeof optionsOrCb === "function" ? optionsOrCb : cb!;
-  const recursive = typeof optionsOrCb === "object" ? optionsOrCb.recursive ?? false : false;
+  const options = typeof optionsOrCb === "object" ? optionsOrCb : {};
+  const recursive = options.recursive ?? false;
   const s = getFs().stat(String(path));
-  if (!s) return callback(null); // rm with force default
+  if (!s) {
+    if (options.force) return callback(null);
+    return callback(new Error(`ENOENT: no such file or directory, rm '${path}'`));
+  }
   if (s.isDirectory) {
     getFs().rmdir(String(path), recursive).then(() => callback(null)).catch(callback);
   } else {
