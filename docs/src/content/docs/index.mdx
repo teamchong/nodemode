@@ -35,7 +35,7 @@ Cloudflare Workers have no `fs`, no `child_process`, and no shell. Web framework
 
 ## Conformance tests
 
-235 tests verify the approach against patterns from popular tools:
+261 tests verify the approach against patterns from popular tools:
 
 | Tool | Tests | Status |
 |------|-------|--------|
@@ -44,7 +44,7 @@ Cloudflare Workers have no `fs`, no `child_process`, and no shell. Web framework
 | zx (Google) — pipes, chains, exit codes, conditionals | 35 | PASS |
 | create-next-app / create-vite / degit — mkdir, templates | 19 | PASS |
 | lint-staged / nodemon / esbuild — spawn, watch, bundle | 17 | PASS |
-| Unit tests — all fs ops, 24 builtins, shell, validation | 67 | PASS |
+| Unit + shim tests — all fs ops, 24 builtins, shell, shim API surface | 93 | PASS |
 
 ## Quick Start
 

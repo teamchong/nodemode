@@ -62,7 +62,7 @@ Shell features: pipes (`|`), chains (`&&`, `||`, `;`), quoted strings.
 
 ## Conformance tests
 
-235 tests verify the approach against patterns from popular tools (all run on builtins, no Container):
+261 tests verify the approach against patterns from popular tools (all run on builtins, no Container):
 
 | Tool | What it needs | Tests |
 |------|--------------|-------|
@@ -71,7 +71,7 @@ Shell features: pipes (`|`), chains (`&&`, `||`, `;`), quoted strings.
 | **zx** (Google) | pipes, chains, exit codes, conditionals, batch ops | 35 |
 | **create-next-app / create-vite / degit** | mkdir, write templates, npm install | 19 |
 | **lint-staged / nodemon / esbuild** | fs.watch, spawn linters, read imports, write bundles | 17 |
-| **Unit tests** | all fs ops, 24 builtins, shell parsing, validation | 67 |
+| **Unit + shim tests** | all fs ops, 24 builtins, shell parsing, shim API surface | 93 |
 
 ## Architecture
 
