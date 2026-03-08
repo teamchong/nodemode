@@ -21,6 +21,7 @@ export default defineConfig({
         { label: "Filesystem (fs)", slug: "filesystem" },
         { label: "Child Process", slug: "child-process" },
         { label: "WebSocket stdio", slug: "websocket-stdio" },
+        { label: "Client SDK", slug: "client-sdk" },
         { label: "REST API", slug: "rest-api" },
         { label: "Deployment", slug: "deployment" },
       ],

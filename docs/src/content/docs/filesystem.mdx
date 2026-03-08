@@ -12,16 +12,18 @@ nodemode's `FsEngine` maps Node.js `fs` operations to R2 (file content) + DO SQL
 | Node.js fs | nodemode | Backing |
 |-----------|----------|---------|
 | `readFile` | `fs.readFile(path)` | SQLite cache → R2 fallback |
+| `readFile` (stream) | `fs.readFileStream(path)` | R2 streaming body |
 | `writeFile` | `fs.writeFile(path, data)` | R2 put + SQLite index |
 | `appendFile` | `fs.appendFile(path, data)` | Read + concat + write |
 | `unlink` | `fs.unlink(path)` | R2 delete + SQLite delete |
 | `stat` | `fs.stat(path)` | SQLite lookup |
 | `exists` | `fs.exists(path)` | SQLite lookup |
 | `readdir` | `fs.readdir(path)` | SQLite prefix query |
-| `mkdir` | `fs.mkdir(path)` | SQLite directory marker |
+| `mkdir` | `fs.mkdir(path, recursive?)` | SQLite directory marker |
 | `rmdir` | `fs.rmdir(path, recursive?)` | R2 batch delete + SQLite |
 | `rename` | `fs.rename(old, new)` | R2 copy+delete + SQLite |
 | `chmod` | `fs.chmod(path, mode)` | SQLite update |
+| `touch` | `fs.touch(path)` | SQLite mtime update |
 
 ## REST API
 
@@ -43,10 +45,30 @@ Content-Type: application/json
 {"path": "src/index.ts"}
 ```
 
+Response: `{"content": "console.log('hello');"}`
+
+### Read a file (streaming)
+
+For files larger than Worker memory limits, use streaming mode:
+
+```
+POST /workspace/{id}/fs/read
+Content-Type: application/json
+
+{"path": "large-file.bin", "stream": true}
+```
+
+Returns raw `application/octet-stream` body directly from R2 (bypasses SQLite cache).
+
 ### Stat a file
 
 ```
 GET /workspace/{id}/fs/stat?path=src/index.ts
+```
+
+Response:
+```json
+{"size": 24, "mode": 420, "mtime": 1709900000000, "isDirectory": false}
 ```
 
 ### List directory
@@ -54,6 +76,16 @@ GET /workspace/{id}/fs/stat?path=src/index.ts
 ```
 GET /workspace/{id}/fs/readdir?path=src
 ```
+
+Response:
+```json
+[
+  {"name": "index.ts", "isDirectory": false},
+  {"name": "lib", "isDirectory": true}
+]
+```
+
+Detects both explicit directories (created via `mkdir`) and implicit directories (inferred from deeper file paths).
 
 ### Create directory
 
@@ -73,7 +105,7 @@ Content-Type: application/json
 {"path": "src/old.ts"}
 ```
 
-### Rename a file
+### Rename a file or directory
 
 ```
 POST /workspace/{id}/fs/rename
@@ -82,17 +114,25 @@ Content-Type: application/json
 {"oldPath": "src/old.ts", "newPath": "src/new.ts"}
 ```
 
+Renaming a directory moves all children. R2 objects are copied to new keys and old keys deleted.
+
 ### Check existence
 
 ```
 GET /workspace/{id}/fs/exists?path=src/index.ts
 ```
 
+Response: `{"exists": true}`
+
 ## Caching Strategy
 
-Files smaller than 64KB are cached in DO SQLite after the first R2 read. Subsequent reads hit SQLite (&lt;1ms) instead of R2 (10-50ms).
+Files smaller than **64KB** are cached in DO SQLite after the first R2 read. Subsequent reads hit SQLite (&lt;1ms) instead of R2 (10-50ms).
 
-Cache is invalidated on write (updated) or delete (evicted).
+- Cache is **updated** on write (file content stored in cache)
+- Cache is **evicted** on delete
+- Cache is **evicted** when file grows above 64KB
+- Max **500 cached entries** — oldest evicted when exceeded
+- Cache is **invalidated** when container sends index invalidation
 
 ## R2 Key Structure
 
@@ -107,3 +147,12 @@ Cache is invalidated on write (updated) or delete (evicted).
 ```
 
 R2 is flat key-value — the directory structure is maintained entirely in SQLite. The `files` table stores path, size, mode, mtime, and an `is_dir` flag.
+
+## Path Validation
+
+All paths are validated before processing:
+- Max 4096 characters
+- Max 256 directory depth
+- No null bytes
+- No traversal above root (`..` past root is rejected)
+- Leading/trailing slashes stripped, double slashes collapsed

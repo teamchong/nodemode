@@ -1,14 +1,14 @@
 ---
 title: Child Process
-description: Tiered command execution — built-in emulators + Containers
+description: Tiered command execution — built-in emulators + Containers + shell parsing
 ---
 
 ## Overview
 
 nodemode's `ProcessManager` maps `child_process.exec()` to a tiered execution model:
 
-1. **Built-in emulators** — common commands run directly in the DO
-2. **Cloudflare Containers** — heavy commands run in real Linux containers
+1. **Built-in emulators** — 24 common commands run directly in the DO ($0, &lt;1ms)
+2. **Cloudflare Containers** — heavy commands run in real Linux via `ctx.container`
 
 ## Built-in Commands
 
@@ -17,25 +17,115 @@ These execute in the DO with zero cost and sub-millisecond latency:
 | Command | Description |
 |---------|------------|
 | `echo` | Print arguments |
-| `cat` | Read file contents |
+| `cat` | Read file contents (supports stdin pipe) |
 | `ls` / `ls -l` / `ls -a` | List directory |
 | `pwd` | Print working directory |
 | `env` | Print environment variables |
-| `head` / `tail` | First/last N lines |
-| `wc` | Word/line/byte count |
-| `grep` | Pattern search in files |
+| `head -n N` | First N lines (file or stdin) |
+| `tail -n N` | Last N lines (file or stdin) |
+| `wc` | Word/line/byte count (file or stdin) |
+| `grep` / `grep -i` | Pattern search (file or stdin, regex or literal) |
 | `mkdir` / `mkdir -p` | Create directories |
 | `rm` / `rm -rf` | Remove files/directories |
 | `cp` | Copy files |
 | `mv` | Move/rename files |
-| `touch` | Create empty file |
+| `touch` | Create empty file or update mtime |
 | `basename` / `dirname` | Path manipulation |
-| `which` | Locate command |
+| `which` | Locate command (reports builtins) |
 | `whoami` | Current user |
-| `date` | Current date/time |
+| `date` | Current date/time (ISO 8601) |
 | `test` | File/string tests (`-f`, `-d`, `-e`, `-z`, `-n`) |
 | `true` / `false` | Exit 0 / exit 1 |
 | `printf` | Formatted output |
+| `sleep` | No-op (returns immediately in DO) |
+
+## Shell Support
+
+### Pipes
+
+Chain commands with `|` — stdout of each stage feeds stdin of the next:
+
+```bash
+cat access.log | grep 200 | head -n 5
+echo hello world | wc
+cat file.txt | grep ERROR | wc
+```
+
+### Chains
+
+Execute commands conditionally:
+
+```bash
+# && — stop on failure
+mkdir -p dist && echo "created"
+
+# || — run on failure (fallback)
+cat missing.txt || echo "not found"
+
+# ; — always run all
+echo first; echo second; echo third
+
+# Combined
+test -f config.json && cat config.json || echo "no config"
+```
+
+### Quoted Strings
+
+Single and double quotes are preserved across pipes and chains:
+
+```bash
+echo "hello world"
+echo 'single quoted'
+grep "multi word pattern" file.txt
+```
+
+## Container Execution
+
+Commands not in the built-in set (npm, node, git, tsc, esbuild, python, cargo, etc.) are routed to a Cloudflare Container:
+
+```
+Workspace DO receives "npm install"
+    → Not a built-in command
+    → Start container if not running (ctx.container.start())
+    → Wait for container ready (ctx.container.monitor())
+    → getTcpPort(8080).fetch("/exec") to container-agent
+    → Container executes in real Linux with bash
+    → Returns stdout/stderr/exitCode
+    → Container sleeps after 10 min inactivity
+```
+
+### Container Lifecycle
+
+- **Boot on demand** — container starts on first non-builtin exec
+- **R2 FUSE mount** — source files available at `/mnt/workspace`, symlinked into `/workspace`
+- **Local build artifacts** — `node_modules`, `dist`, `.npm`, `.next`, `build` on fast local disk
+- **Snapshot/restore** — SIGTERM triggers tar+zstd of build dirs to R2, restored on next boot
+- **Inactivity timeout** — 10 min idle via `setInactivityTimeout()`, container sleeps
+- **Health checks** — DO alarm every 30s pings `/healthz` and reconciles R2 index
+- **Index invalidation** — container POSTs `/index-invalidate` when files change via FUSE
+
+### Container Config
+
+In `wrangler.jsonc`:
+
+```jsonc
+{
+  "durable_objects": {
+    "bindings": [{
+      "name": "WORKSPACE",
+      "class_name": "Workspace",
+      "container": {
+        "image": "./container/Dockerfile",
+        "max_instances": 10
+      }
+    }]
+  }
+}
+```
+
+### Exit Code 127
+
+If no container is available (local dev, test environment), non-builtin commands return exit code 127 with a "command not found" message. This is expected — builtins work everywhere, containers work in production.
 
 ## REST API
 
@@ -45,14 +135,14 @@ These execute in the DO with zero cost and sub-millisecond latency:
 POST /workspace/{id}/exec
 Content-Type: application/json
 
-{"command": "cat src/index.ts", "cwd": "/project"}
+{"command": "cat src/index.ts | grep export", "cwd": "/project"}
 ```
 
 Response:
 ```json
 {
   "exitCode": 0,
-  "stdout": "console.log('hello');\n",
+  "stdout": "export const hello = 'world';\n",
   "stderr": ""
 }
 ```
@@ -63,34 +153,18 @@ Response:
 GET /workspace/{id}/process/list
 ```
 
+Returns metadata only (pid, command, status, exitCode). Use `/process/get` for full output.
+
 ### Get process details
 
 ```
 GET /workspace/{id}/process/get?pid=42
 ```
 
-## Command Parsing
+Returns full process details including stdout and stderr.
 
-Commands are parsed with basic shell-like quoting:
+## Process Table
 
-```bash
-echo "hello world"        → echo ["hello world"]
-cat 'file name.txt'       → cat ["file name.txt"]
-grep pattern file.txt     → grep ["pattern", "file.txt"]
-```
-
-## Container Execution (Planned)
-
-For commands not in the built-in set (npm, node, python, cargo, etc.), nodemode will spawn a Cloudflare Container:
-
-```
-Workspace DO receives "npm install"
-    → Not a built-in command
-    → Spawn Container with Node.js image
-    → getTcpPort(8080).fetch() to send command
-    → Container executes in real Linux
-    → Returns stdout/stderr/exitCode
-    → Container sleeps (billed only while active)
-```
-
-This mirrors the edgebox architecture where commands are tiered between WASM-native execution and OS-level process spawning.
+- Stores last 1000 processes (older completed entries pruned automatically)
+- Output truncated to 4KB per field in storage (full output returned from exec call)
+- Tracks: pid, command, args, status (running/done/error), exit_code, timestamps

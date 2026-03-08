@@ -9,6 +9,8 @@ description: HTTP API reference for nodemode workspaces
 https://your-worker.your-subdomain.workers.dev
 ```
 
+All REST endpoints include CORS headers by default. OPTIONS preflight requests return 204.
+
 ## Workspace Management
 
 ### List Workspaces
@@ -17,7 +19,11 @@ https://your-worker.your-subdomain.workers.dev
 GET /api/workspaces
 ```
 
-Returns workspace IDs discovered via R2 prefix scan.
+Returns workspace IDs discovered via paginated R2 prefix scan.
+
+```json
+{"workspaces": ["project-a", "project-b"]}
+```
 
 ### Initialize Workspace
 
@@ -27,6 +33,8 @@ Content-Type: application/json
 
 {"owner": "alice", "name": "my-project"}
 ```
+
+Idempotent — returns `{"status": "already_initialized"}` if called again.
 
 ## Filesystem
 
@@ -42,14 +50,37 @@ POST /workspace/{id}/fs/read
 {"path": "src/index.ts"}
 ```
 
+Response: `{"content": "..."}`
+
+### Read File (Streaming)
+
+For large files, request streaming mode to avoid Worker memory limits:
+
+```
+POST /workspace/{id}/fs/read
+{"path": "large-file.bin", "stream": true}
+```
+
+Returns raw `application/octet-stream` body.
+
 ### Stat File
 ```
 GET /workspace/{id}/fs/stat?path=src/index.ts
 ```
 
+Response:
+```json
+{"size": 42, "mode": 420, "mtime": 1709900000000, "isDirectory": false}
+```
+
 ### List Directory
 ```
 GET /workspace/{id}/fs/readdir?path=src
+```
+
+Response:
+```json
+[{"name": "index.ts", "isDirectory": false}, {"name": "lib", "isDirectory": true}]
 ```
 
 ### Create Directory
@@ -70,33 +101,67 @@ POST /workspace/{id}/fs/rename
 {"oldPath": "old.ts", "newPath": "new.ts"}
 ```
 
+Supports renaming directories (all children moved).
+
 ### Check Existence
 ```
 GET /workspace/{id}/fs/exists?path=src/index.ts
 ```
+
+Response: `{"exists": true}`
 
 ## Command Execution
 
 ### Execute Command
 ```
 POST /workspace/{id}/exec
-{"command": "ls -la", "cwd": "/project", "env": {"NODE_ENV": "production"}}
+{"command": "cat file.txt | grep pattern", "cwd": "/project", "env": {"NODE_ENV": "production"}}
 ```
 
 Response:
 ```json
-{"exitCode": 0, "stdout": "...", "stderr": ""}
+{"exitCode": 0, "stdout": "matched line\n", "stderr": ""}
 ```
+
+Supports pipes (`|`), chains (`&&`, `||`, `;`), and quoted strings.
 
 ### List Processes
 ```
 GET /workspace/{id}/process/list
 ```
 
+Returns metadata for last 100 processes (pid, command, status, exitCode). Does not include stdout/stderr — use `/process/get` for full details.
+
 ### Get Process
 ```
 GET /workspace/{id}/process/get?pid=42
 ```
+
+Returns full process details including stdout and stderr (truncated to 4KB in storage).
+
+## Container
+
+### Container Status
+```
+GET /workspace/{id}/container/status
+```
+
+Response: `{"status": "running"}` (or "stopped", "starting", "sleeping", "crashed")
+
+### Stop Container
+```
+POST /workspace/{id}/container/stop
+```
+
+Sends SIGTERM — container snapshots build artifacts to R2, then exits.
+
+### Index Invalidation
+```
+POST /workspace/{id}/index-invalidate
+{"paths": ["src/index.ts", "package.json"]}
+```
+
+Refreshes SQLite index entries from R2 for the specified paths. Used by the container agent when files change via R2 FUSE mount. Broadcasts update to connected WebSocket clients.
 
 ## WebSocket
 
@@ -105,11 +170,16 @@ GET /workspace/{id}/process/get?pid=42
 GET /workspace/{id}/ (Upgrade: websocket)
 ```
 
+On connect, receives buffered terminal output history (last 1000 entries).
+
 ### Execute via WebSocket
 ```json
-{"type": "exec", "command": "grep pattern file.txt"}
+{"type": "exec", "command": "ls -la", "cwd": "/project"}
 ```
 
-## CORS
+Response:
+```json
+{"type": "result", "exitCode": 0, "stdout": "...", "stderr": ""}
+```
 
-All REST endpoints include CORS headers by default. OPTIONS preflight requests return 204 with appropriate headers.
+Output is also broadcast to all other connected WebSocket clients.

@@ -3,26 +3,53 @@ title: nodemode
 description: Node.js runtime on Cloudflare Workers — R2 filesystem, DO child_process, Container execution
 ---
 
-**nodemode** maps Node.js primitives to Cloudflare primitives, giving you a serverless Node.js environment without VMs.
+**nodemode** maps Node.js primitives to Cloudflare primitives, giving you a serverless Node.js environment with real `fs`, `child_process`, and shell — things impossible on vanilla Cloudflare Workers.
+
+## Why nodemode?
+
+Cloudflare Workers have no `fs`, no `child_process`, and no shell. Web frameworks like Next.js work fine on Workers (via [vinext](https://github.com/cloudflare/vinext) or OpenNext), but dev tools, CLI scripts, build systems, and AI coding agents that need the filesystem and shell cannot run at all.
+
+nodemode bridges this gap:
+
+| Tool | What it needs | Workers alone | With nodemode |
+|------|--------------|---------------|---------------|
+| **zx** (Google) | Shell, pipes, exit codes | Impossible | Works |
+| **simple-git** | .git/ filesystem, refs | Impossible | Works |
+| **create-next-app** | mkdir, templates, npm | Impossible | Works |
+| **lint-staged** | spawn linters, fs.watch | Impossible | Works |
+| **AI coding agents** | fs read/write, exec | Impossible | Works |
 
 ## Mapping
 
 | Node.js | Cloudflare Primitive | Status |
 |---------|---------------------|--------|
-| `fs.readFile` / `writeFile` | R2 `get()` / `put()` | Works today |
-| `fs.readdir` | R2 `list()` + DO SQLite index | Works today |
-| `fs.stat` | DO SQLite metadata | Works today |
-| `child_process.exec` (light) | Built-in emulators in DO | Works today |
-| `child_process.spawn` (heavy) | Cloudflare Container | Planned |
-| `stdin` / `stdout` | WebSocket to browser | Works today |
-| `stdout` persistence | DO SQLite buffer | Works today |
-| `process.env` | Worker env / Secrets | Works today |
-| `os.tmpdir` / temp files | DO SQLite | Works today |
+| `fs.readFile` / `writeFile` | R2 `get()` / `put()` + SQLite cache | Working |
+| `fs.readdir` / `stat` | DO SQLite directory index | Working |
+| `child_process.exec` (builtins) | 24 in-DO command emulators | Working |
+| `child_process.spawn` (heavy) | Cloudflare Container via `ctx.container` | Working |
+| Pipes `cmd1 \| cmd2` | Built-in pipe support | Working |
+| Chains `&&` `\|\|` `;` | Built-in chain support | Working |
+| `stdin` / `stdout` / `stderr` | WebSocket + DO SQLite buffer | Working |
+| `process.env` | Worker env / Secrets | Working |
+
+## Conformance: 235 tests passing
+
+Proves nodemode can support popular Node.js tools:
+
+| Tool | Tests | Status |
+|------|-------|--------|
+| opencode (AI agent) — fs, exec, refactoring, configs, monorepo | 61 | PASS |
+| simple-git — .git/ fs, refs, tags, remotes, merge conflicts | 36 | PASS |
+| zx (Google) — pipes, chains, exit codes, conditionals | 35 | PASS |
+| create-next-app / create-vite / degit — mkdir, templates | 19 | PASS |
+| lint-staged / nodemon / esbuild — spawn, watch, bundle | 17 | PASS |
+| Unit tests — all fs ops, 24 builtins, shell, validation | 67 | PASS |
 
 ## Quick Start
 
 ```bash
 npx nodemode init
+npm install
 npx nodemode deploy
 ```
 
@@ -33,17 +60,25 @@ export { Workspace };
 export default { fetch: createHandler() };
 ```
 
-## Architecture
+Or use the client SDK from any JavaScript environment:
 
-nodemode runs as a Cloudflare Worker with two backing services:
+```ts
+import { NodeMode } from "nodemode/client";
 
-- **R2** — virtual filesystem (file content as R2 objects)
-- **Durable Objects + SQLite** — per-workspace state (directory index, process table, terminal buffer)
+const nm = new NodeMode("https://my-worker.workers.dev", "my-workspace");
+await nm.writeFile("index.ts", "console.log('hello');");
+const result = await nm.exec("cat index.ts | grep hello");
+```
 
-Each workspace is an isolated DO instance with its own filesystem and process table. Commands execute in a tiered model:
+## How nodemode differs from vinext
 
-1. **Built-in** (cat, ls, grep, echo) — handled in DO, zero cost, sub-millisecond
-2. **Container** (npm, node, python) — spawns Cloudflare Container, real Linux
+**vinext** reimplements the Next.js API surface on Vite so Next.js apps can deploy to Workers. It solves "run my web framework on the edge" — web frameworks don't need `fs` or `child_process`.
+
+**nodemode** provides `fs`, `child_process`, and shell primitives that Workers lack. It solves "run my dev tools, build systems, and CLI scripts on the edge."
+
+They are complementary:
+- vinext = run Next.js apps on Workers (no shell needed)
+- nodemode = run tools that need shell + filesystem on Workers (zx, git, npm, AI agents)
 
 ## Related Projects
 

@@ -16,14 +16,35 @@ command arrives at Workspace DO
   Is it a built-in? (cat, ls, grep, echo, pwd, ...)
         │
         ├── YES → Execute in DO directly
-        │         $0 cost, &lt;1ms latency
+        │         $0 cost, <1ms latency
         │         Reads/writes via FsEngine (R2 + SQLite)
         │
-        └── NO → Spawn Cloudflare Container
+        └── NO → Route to Cloudflare Container
                   ~$0.02/hr, real Linux filesystem
-                  getTcpPort().fetch() for communication
+                  ctx.container.getTcpPort(8080).fetch()
                   Container runs command → returns result → sleeps
 ```
+
+### Shell Parsing Pipeline
+
+Before dispatch, the command string is parsed for shell operators:
+
+```
+"cat file | grep ERROR && echo found || echo missing"
+        │
+        ▼
+  splitPipeline() → ["cat file", "grep ERROR && echo found || echo missing"]
+        │
+        ▼
+  For pipe segments without pipes:
+    splitChain() → [{cmd: "grep ERROR", op: ""}, {cmd: "echo found", op: "&&"}, ...]
+        │
+        ▼
+  Each segment dispatched to execSingle()
+    → builtin or container
+```
+
+Pipes feed stdout→stdin between stages. Chains evaluate `&&` (stop on fail), `||` (run on fail), and `;` (always run).
 
 ## Storage Strategy
 
@@ -37,10 +58,10 @@ Files are stored as R2 objects keyed by `{workspace_id}/{path}`. R2 provides:
 ### DO SQLite for Metadata
 
 R2 is a flat key-value store — it has no directory concept. DO SQLite provides:
-- Directory index (path → size, mode, mtime, is_dir)
-- Hot file cache (files < 64KB cached in SQLite for &lt;1ms reads vs R2's 10-50ms)
-- Process table (command history, stdout/stderr capture)
-- Terminal buffer (persists output across DO hibernation)
+- **Directory index** (path → size, mode, mtime, is_dir)
+- **Hot file cache** (files &lt; 64KB cached in SQLite for &lt;1ms reads vs R2's 10-50ms)
+- **Process table** (last 1000 commands, output truncated to 4KB)
+- **Terminal buffer** (last 5000 rows, persists output across DO hibernation)
 
 ### Why This Split?
 
@@ -52,21 +73,70 @@ R2 is a flat key-value store — it has no directory concept. DO SQLite provides
 | Consistency | Eventually consistent | Strongly consistent |
 | Hot reads | 10-50ms | &lt;1ms (cached) |
 
+## Container Integration
+
+Non-builtin commands run in a Cloudflare Container attached to the DO via `ctx.container`:
+
+```
+┌─────────────────────────────────┐
+│ Workspace Durable Object        │
+│                                 │
+│  ┌──────────┐  ┌─────────────┐  │     ┌──────────────────────┐
+│  │ FsEngine │  │ProcessManager│──┼────▶│ Container            │
+│  │ (R2+SQL) │  │(builtins)   │  │     │                      │
+│  └──────────┘  └─────────────┘  │     │  agent.mjs :8080     │
+│                                 │     │  ├── /exec            │
+│  ctx.container.getTcpPort(8080) │     │  ├── /healthz         │
+│                                 │     │  └── /sync/snapshot   │
+│  alarm() → health check        │     │                      │
+│          → index reconciliation │     │  /workspace/ (symlinks)│
+│                                 │     │  /mnt/workspace (FUSE)│
+│  WebSocket stdio                │     │  /local/ (fast disk)  │
+└─────────────────────────────────┘     └──────────────────────┘
+```
+
+### Container Lifecycle
+
+1. **First exec** → `container.start()` with env vars, `container.monitor()` to wait
+2. **Running** → Commands via `getTcpPort(8080).fetch("/exec")`
+3. **Idle 10 min** → `setInactivityTimeout()` puts container to sleep
+4. **SIGTERM** → agent snapshots `node_modules`/`dist` as tar.zst to R2
+5. **Next exec** → Container boots, restores snapshots, ready in seconds
+6. **Health check** → DO alarm every 30s: ping + R2↔SQLite index reconciliation
+
+### File Sync Model
+
+| Files | Location | Speed | Persistence |
+|-------|----------|-------|-------------|
+| Source files | R2 FUSE mount → `/mnt/workspace` | Medium | Permanent |
+| Build artifacts | Container local → `/local/` | Fast | Snapshot to R2 on sleep |
+| SQLite index | DO SQLite | &lt;1ms | Permanent |
+
 ## Workspace Isolation
 
 Each workspace is a separate Durable Object instance:
 - Own SQLite database (filesystem index, process table)
 - Own R2 prefix (`{workspace_id}/`)
+- Own Container instance
 - Own WebSocket connections
 - Single-threaded (no locks needed)
 - Hibernates when idle (zero cost)
+
+## Input Validation
+
+All inputs validated at system boundaries:
+- **Paths**: max 4096 chars, max 256 depth, no null bytes, no traversal above root
+- **Commands**: max 8192 chars, no null bytes
+- **Workspace IDs**: alphanumeric + `.`, `-`, `_`, max 128 chars
+- **Payloads**: max 100MB (Worker), max 10MB (container agent)
+- **Regex**: invalid grep patterns fall back to literal string matching
 
 ## Composition with Other *mode Packages
 
 ```
 termweb workspace
 ├── gitmode   — git storage (R2 + DO SQLite)
-├── nodemode  — Node.js runtime (R2 fs + DO child_process + WebSocket stdio)
+├── nodemode  — Node.js runtime (R2 fs + DO child_process + Container)
 ├── pymode    — Python runtime (CPython WASM + DO fan-out)
 ├── querymode — SQL queries (columnar engine + R2 spill)
 └── workspace — orchestrator (auth + routing + lifecycle)

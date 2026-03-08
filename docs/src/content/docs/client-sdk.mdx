@@ -1,0 +1,176 @@
+---
+title: Client SDK
+description: TypeScript SDK for interacting with nodemode from any JavaScript environment
+---
+
+## Overview
+
+The `NodeMode` client SDK provides a typed HTTP client for interacting with a nodemode instance. It works in browsers, Node.js, Deno, Bun, and Cloudflare Workers.
+
+## Installation
+
+```bash
+npm install nodemode
+```
+
+## Usage
+
+```ts
+import { NodeMode } from "nodemode/client";
+
+const nm = new NodeMode("https://my-worker.workers.dev", "my-workspace");
+
+// Initialize workspace
+await nm.init({ owner: "alice", name: "my-project" });
+
+// Write files
+await nm.writeFile("src/index.ts", "export const hello = 'world';");
+
+// Read files
+const content = await nm.readFile("src/index.ts");
+
+// Execute commands (supports pipes and chains)
+const result = await nm.exec("cat src/index.ts | grep export");
+console.log(result.stdout); // "export const hello = 'world';\n"
+
+// Check files
+const exists = await nm.exists("src/index.ts");
+const stat = await nm.stat("src/index.ts");
+const entries = await nm.readdir("src");
+```
+
+## API Reference
+
+### Constructor
+
+```ts
+new NodeMode(baseUrl: string, workspaceId: string, fetchFn?: typeof fetch)
+```
+
+- `baseUrl` — URL of your nodemode Worker
+- `workspaceId` — workspace name (alphanumeric, `.`, `-`, `_`)
+- `fetchFn` — custom fetch function (for testing or custom auth headers)
+
+### Workspace
+
+```ts
+await nm.init({ owner: "alice", name: "my-project" });
+// Returns: { status: "initialized" } or { status: "already_initialized" }
+```
+
+### Filesystem
+
+```ts
+// Write
+await nm.writeFile("path/to/file.ts", "content", 0o644);
+
+// Read
+const content: string = await nm.readFile("path/to/file.ts");
+
+// Stream read (large files)
+const stream: ReadableStream = await nm.readFileStream("large-file.bin");
+
+// Metadata
+const stat: FileStat = await nm.stat("file.ts");
+// { size: 42, mode: 420, mtime: 1709900000000, isDirectory: false }
+
+// Directory listing
+const entries: DirEntry[] = await nm.readdir("src");
+// [{ name: "index.ts", isDirectory: false }, { name: "lib", isDirectory: true }]
+
+// Create directory
+await nm.mkdir("src/lib", true); // recursive
+
+// Delete
+await nm.unlink("old-file.ts");
+
+// Rename
+await nm.rename("old.ts", "new.ts");
+
+// Existence check
+const exists: boolean = await nm.exists("file.ts");
+```
+
+### Command Execution
+
+```ts
+const result: SpawnResult = await nm.exec("cat file.txt | grep pattern", {
+  cwd: "/project",
+  env: { NODE_ENV: "production" },
+});
+// { exitCode: 0, stdout: "...", stderr: "" }
+```
+
+### Process Management
+
+```ts
+// List recent processes (metadata only)
+const processes: ProcessHandle[] = await nm.listProcesses();
+
+// Get process details (includes stdout/stderr)
+const proc: ProcessHandle = await nm.getProcess(42);
+```
+
+### Container
+
+```ts
+// Check container status
+const status: ContainerStatus = await nm.containerStatus();
+// "running" | "stopped" | "starting" | "sleeping" | "crashed"
+
+// Stop container (triggers snapshot)
+await nm.containerStop();
+```
+
+### WebSocket
+
+```ts
+const ws: WebSocket = nm.connectWebSocket();
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  console.log(msg.stdout || msg.data);
+};
+
+ws.send(JSON.stringify({ type: "exec", command: "ls -la" }));
+```
+
+## Static Helpers
+
+### List all workspaces
+
+```ts
+import { listWorkspaces } from "nodemode/client";
+
+const workspaces: string[] = await listWorkspaces("https://my-worker.workers.dev");
+```
+
+## Type Exports
+
+The client package re-exports all types for use without importing from the main package:
+
+```ts
+import type {
+  FileStat,
+  DirEntry,
+  SpawnResult,
+  SpawnOptions,
+  ProcessHandle,
+  ContainerStatus,
+} from "nodemode/client";
+```
+
+## Custom Fetch
+
+Pass a custom fetch function for authentication or testing:
+
+```ts
+const authedFetch: typeof fetch = (url, init) => {
+  return fetch(url, {
+    ...init,
+    headers: { ...init?.headers, Authorization: `Bearer ${token}` },
+  });
+};
+
+const nm = new NodeMode(baseUrl, workspaceId, authedFetch);
+```
