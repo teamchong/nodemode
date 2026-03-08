@@ -1,0 +1,119 @@
+---
+title: Getting Started
+description: Set up nodemode in under 5 minutes
+---
+
+## Prerequisites
+
+- A [Cloudflare account](https://dash.cloudflare.com/sign-up)
+- Node.js 18+ and npm/pnpm
+
+## Option 1: CLI Scaffold
+
+```bash
+mkdir my-workspace && cd my-workspace
+npx nodemode init
+npm install
+npx nodemode deploy
+```
+
+This creates:
+- `worker/index.ts` — Worker entry point
+- `wrangler.jsonc` — Cloudflare config (R2 bucket + DO bindings)
+- `package.json` — with nodemode dependency
+
+## Option 2: Manual Setup
+
+```bash
+npm init -y
+npm install nodemode
+npm install -D wrangler @cloudflare/workers-types typescript
+```
+
+Create `worker/index.ts`:
+
+```ts
+import { Workspace, createHandler } from "nodemode";
+import type { Env } from "nodemode";
+
+export { Workspace };
+
+const handler = createHandler();
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    return handler(request, env);
+  },
+};
+```
+
+Create `wrangler.jsonc`:
+
+```jsonc
+{
+  "name": "my-workspace",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2025-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "r2_buckets": [
+    { "binding": "FS_BUCKET", "bucket_name": "nodemode-fs" }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "WORKSPACE", "class_name": "Workspace" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Workspace"] }
+  ]
+}
+```
+
+Deploy:
+
+```bash
+npx wrangler deploy
+```
+
+## Using the API
+
+Once deployed, interact with your workspace via HTTP:
+
+```bash
+BASE="https://my-workspace.your-subdomain.workers.dev"
+WS="my-project"
+
+# Initialize workspace
+curl -X POST "$BASE/workspace/$WS/init" \
+  -H "Content-Type: application/json" \
+  -d '{"owner": "alice", "name": "my-project"}'
+
+# Write a file
+curl -X POST "$BASE/workspace/$WS/fs/write" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "hello.txt", "content": "Hello from nodemode!"}'
+
+# Read a file
+curl -X POST "$BASE/workspace/$WS/fs/read" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "hello.txt"}'
+
+# Run a command
+curl -X POST "$BASE/workspace/$WS/exec" \
+  -H "Content-Type: application/json" \
+  -d '{"command": "cat hello.txt"}'
+
+# List directory
+curl "$BASE/workspace/$WS/fs/readdir?path=/"
+```
+
+## Local Development
+
+```bash
+npx wrangler dev
+```
+
+This starts a local development server with Miniflare, giving you a local R2 bucket and Durable Objects for testing.

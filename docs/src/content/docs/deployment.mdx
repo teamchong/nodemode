@@ -1,0 +1,66 @@
+---
+title: Deployment
+description: Deploy nodemode to Cloudflare Workers
+---
+
+## One-Command Deploy
+
+```bash
+npx nodemode deploy
+```
+
+This runs `npx wrangler deploy` under the hood.
+
+## Prerequisites
+
+1. A Cloudflare account with Workers Paid plan (for Durable Objects + R2)
+2. `wrangler` authenticated: `npx wrangler login`
+
+## What Gets Deployed
+
+- **Worker** — stateless HTTP router (`worker/index.ts`)
+- **Durable Object** — `Workspace` class with SQLite storage
+- **R2 Bucket** — `nodemode-fs` for file content
+
+## Resource Limits
+
+| Resource | Limit |
+|----------|-------|
+| Worker memory | 128 MB per isolate |
+| DO SQLite storage | 10 GB per DO (paid plan) |
+| R2 storage | Unlimited ($0.015/GB/month) |
+| DO CPU per invocation | 30s (configurable via `limits.cpu_ms`) |
+| R2 read latency | 10-50ms (cache hot files in SQLite) |
+| DO SQLite read latency | &lt;1ms |
+
+## Custom Domain
+
+Add a custom domain in the Cloudflare dashboard or via wrangler:
+
+```jsonc
+// wrangler.jsonc
+{
+  "routes": [
+    { "pattern": "nodemode.example.com/*", "zone_name": "example.com" }
+  ]
+}
+```
+
+## Environment Variables
+
+Set secrets via wrangler:
+
+```bash
+npx wrangler secret put API_KEY
+```
+
+Access in your handler via `env.API_KEY`.
+
+## Scaling
+
+nodemode scales automatically:
+- **Workers** — thousands of concurrent requests, globally distributed
+- **Durable Objects** — one per workspace, single-threaded, hibernates when idle
+- **R2** — unlimited storage, global replication
+
+Each workspace is isolated. Creating 10,000 workspaces means 10,000 independent DOs, each with their own SQLite database and R2 prefix.

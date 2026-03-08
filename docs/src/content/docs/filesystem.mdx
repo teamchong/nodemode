@@ -1,0 +1,109 @@
+---
+title: Filesystem (fs)
+description: R2-backed filesystem with SQLite directory index
+---
+
+## Overview
+
+nodemode's `FsEngine` maps Node.js `fs` operations to R2 (file content) + DO SQLite (directory index and cache).
+
+## Supported Operations
+
+| Node.js fs | nodemode | Backing |
+|-----------|----------|---------|
+| `readFile` | `fs.readFile(path)` | SQLite cache → R2 fallback |
+| `writeFile` | `fs.writeFile(path, data)` | R2 put + SQLite index |
+| `appendFile` | `fs.appendFile(path, data)` | Read + concat + write |
+| `unlink` | `fs.unlink(path)` | R2 delete + SQLite delete |
+| `stat` | `fs.stat(path)` | SQLite lookup |
+| `exists` | `fs.exists(path)` | SQLite lookup |
+| `readdir` | `fs.readdir(path)` | SQLite prefix query |
+| `mkdir` | `fs.mkdir(path)` | SQLite directory marker |
+| `rmdir` | `fs.rmdir(path, recursive?)` | R2 batch delete + SQLite |
+| `rename` | `fs.rename(old, new)` | R2 copy+delete + SQLite |
+| `chmod` | `fs.chmod(path, mode)` | SQLite update |
+
+## REST API
+
+### Write a file
+
+```
+POST /workspace/{id}/fs/write
+Content-Type: application/json
+
+{"path": "src/index.ts", "content": "console.log('hello');", "mode": 420}
+```
+
+### Read a file
+
+```
+POST /workspace/{id}/fs/read
+Content-Type: application/json
+
+{"path": "src/index.ts"}
+```
+
+### Stat a file
+
+```
+GET /workspace/{id}/fs/stat?path=src/index.ts
+```
+
+### List directory
+
+```
+GET /workspace/{id}/fs/readdir?path=src
+```
+
+### Create directory
+
+```
+POST /workspace/{id}/fs/mkdir
+Content-Type: application/json
+
+{"path": "src/lib", "recursive": true}
+```
+
+### Delete a file
+
+```
+POST /workspace/{id}/fs/unlink
+Content-Type: application/json
+
+{"path": "src/old.ts"}
+```
+
+### Rename a file
+
+```
+POST /workspace/{id}/fs/rename
+Content-Type: application/json
+
+{"oldPath": "src/old.ts", "newPath": "src/new.ts"}
+```
+
+### Check existence
+
+```
+GET /workspace/{id}/fs/exists?path=src/index.ts
+```
+
+## Caching Strategy
+
+Files smaller than 64KB are cached in DO SQLite after the first R2 read. Subsequent reads hit SQLite (&lt;1ms) instead of R2 (10-50ms).
+
+Cache is invalidated on write (updated) or delete (evicted).
+
+## R2 Key Structure
+
+```
+{workspace_id}/
+├── src/
+│   ├── index.ts      → R2 key: "{workspace_id}/src/index.ts"
+│   └── lib/
+│       └── util.ts   → R2 key: "{workspace_id}/src/lib/util.ts"
+├── package.json      → R2 key: "{workspace_id}/package.json"
+└── .gitignore        → R2 key: "{workspace_id}/.gitignore"
+```
+
+R2 is flat key-value — the directory structure is maintained entirely in SQLite. The `files` table stores path, size, mode, mtime, and an `is_dir` flag.

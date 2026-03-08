@@ -1,0 +1,99 @@
+---
+title: WebSocket stdio
+description: Stream stdin/stdout/stderr over WebSocket with hibernation persistence
+---
+
+## Overview
+
+nodemode provides real-time terminal I/O via WebSocket, with output persistence across DO hibernation using SQLite buffering.
+
+## Connecting
+
+Upgrade any workspace endpoint to WebSocket:
+
+```javascript
+const ws = new WebSocket("wss://my-workspace.example.com/workspace/my-project/");
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  // msg.stream: "stdout" | "stderr"
+  // msg.data: string content
+  console.log(`[${msg.stream}] ${msg.data}`);
+};
+
+// Execute a command
+ws.send(JSON.stringify({
+  type: "exec",
+  command: "ls -la",
+}));
+```
+
+## Message Format
+
+### Client → Server
+
+```json
+{
+  "type": "exec",
+  "command": "grep TODO src/*.ts",
+  "cwd": "/project"
+}
+```
+
+### Server → Client (result)
+
+```json
+{
+  "type": "result",
+  "exitCode": 0,
+  "stdout": "src/index.ts:42: // TODO fix this\n",
+  "stderr": ""
+}
+```
+
+### Server → Client (broadcast)
+
+When multiple clients are connected, stdout/stderr from one client's commands are broadcast to all others:
+
+```json
+{
+  "stream": "stdout",
+  "data": "src/index.ts:42: // TODO fix this\n"
+}
+```
+
+## Hibernation Persistence
+
+When a DO hibernates (after ~10s of inactivity), the WebSocket is torn down. nodemode persists terminal output in SQLite's `terminal_buffer` table.
+
+When a new WebSocket connects, it receives the buffered output history before any new commands.
+
+This means:
+1. Run a long command
+2. Close your browser
+3. Reopen — see the output that happened while disconnected
+
+## Integration with xterm.js
+
+```javascript
+import { Terminal } from "xterm";
+
+const term = new Terminal();
+term.open(document.getElementById("terminal"));
+
+const ws = new WebSocket("wss://...");
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  if (msg.stream === "stdout" || msg.type === "result") {
+    term.write(msg.data || msg.stdout || "");
+  }
+  if (msg.stream === "stderr" || msg.stderr) {
+    term.write(`\x1b[31m${msg.stderr || msg.data}\x1b[0m`);
+  }
+};
+
+term.onData((data) => {
+  ws.send(JSON.stringify({ type: "exec", command: data.trim() }));
+});
+```

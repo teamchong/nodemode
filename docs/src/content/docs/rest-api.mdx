@@ -1,0 +1,115 @@
+---
+title: REST API
+description: HTTP API reference for nodemode workspaces
+---
+
+## Base URL
+
+```
+https://your-worker.your-subdomain.workers.dev
+```
+
+## Workspace Management
+
+### List Workspaces
+
+```
+GET /api/workspaces
+```
+
+Returns workspace IDs discovered via R2 prefix scan.
+
+### Initialize Workspace
+
+```
+POST /workspace/{id}/init
+Content-Type: application/json
+
+{"owner": "alice", "name": "my-project"}
+```
+
+## Filesystem
+
+### Write File
+```
+POST /workspace/{id}/fs/write
+{"path": "src/index.ts", "content": "...", "mode": 420}
+```
+
+### Read File
+```
+POST /workspace/{id}/fs/read
+{"path": "src/index.ts"}
+```
+
+### Stat File
+```
+GET /workspace/{id}/fs/stat?path=src/index.ts
+```
+
+### List Directory
+```
+GET /workspace/{id}/fs/readdir?path=src
+```
+
+### Create Directory
+```
+POST /workspace/{id}/fs/mkdir
+{"path": "src/lib", "recursive": true}
+```
+
+### Delete File
+```
+POST /workspace/{id}/fs/unlink
+{"path": "old.ts"}
+```
+
+### Rename File
+```
+POST /workspace/{id}/fs/rename
+{"oldPath": "old.ts", "newPath": "new.ts"}
+```
+
+### Check Existence
+```
+GET /workspace/{id}/fs/exists?path=src/index.ts
+```
+
+## Command Execution
+
+### Execute Command
+```
+POST /workspace/{id}/exec
+{"command": "ls -la", "cwd": "/project", "env": {"NODE_ENV": "production"}}
+```
+
+Response:
+```json
+{"exitCode": 0, "stdout": "...", "stderr": ""}
+```
+
+### List Processes
+```
+GET /workspace/{id}/process/list
+```
+
+### Get Process
+```
+GET /workspace/{id}/process/get?pid=42
+```
+
+## WebSocket
+
+### Connect
+```
+GET /workspace/{id}/ (Upgrade: websocket)
+```
+
+### Execute via WebSocket
+```json
+{"type": "exec", "command": "grep pattern file.txt"}
+```
+
+## CORS
+
+All REST endpoints include CORS headers by default. OPTIONS preflight requests return 204 with appropriate headers.

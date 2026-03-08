@@ -1,0 +1,52 @@
+---
+title: nodemode
+description: Node.js runtime on Cloudflare Workers — R2 filesystem, DO child_process, Container execution
+---
+
+**nodemode** maps Node.js primitives to Cloudflare primitives, giving you a serverless Node.js environment without VMs.
+
+## Mapping
+
+| Node.js | Cloudflare Primitive | Status |
+|---------|---------------------|--------|
+| `fs.readFile` / `writeFile` | R2 `get()` / `put()` | Works today |
+| `fs.readdir` | R2 `list()` + DO SQLite index | Works today |
+| `fs.stat` | DO SQLite metadata | Works today |
+| `child_process.exec` (light) | Built-in emulators in DO | Works today |
+| `child_process.spawn` (heavy) | Cloudflare Container | Planned |
+| `stdin` / `stdout` | WebSocket to browser | Works today |
+| `stdout` persistence | DO SQLite buffer | Works today |
+| `process.env` | Worker env / Secrets | Works today |
+| `os.tmpdir` / temp files | DO SQLite | Works today |
+
+## Quick Start
+
+```bash
+npx nodemode init
+npx nodemode deploy
+```
+
+```ts
+import { Workspace, createHandler } from "nodemode";
+
+export { Workspace };
+export default { fetch: createHandler() };
+```
+
+## Architecture
+
+nodemode runs as a Cloudflare Worker with two backing services:
+
+- **R2** — virtual filesystem (file content as R2 objects)
+- **Durable Objects + SQLite** — per-workspace state (directory index, process table, terminal buffer)
+
+Each workspace is an isolated DO instance with its own filesystem and process table. Commands execute in a tiered model:
+
+1. **Built-in** (cat, ls, grep, echo) — handled in DO, zero cost, sub-millisecond
+2. **Container** (npm, node, python) — spawns Cloudflare Container, real Linux
+
+## Related Projects
+
+- [gitmode](https://github.com/teamchong/gitmode) — Git server on Cloudflare Workers
+- [pymode](https://github.com/teamchong/pymode) — Python runtime on Cloudflare Workers
+- [querymode](https://github.com/teamchong/querymode) — Columnar query engine on Cloudflare Workers

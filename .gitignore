@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.wrangler/
+.claude/
+*.log
+docs/node_modules/
+docs/dist/
+docs/.astro/
+docs/package-lock.json
+pnpm-lock.yaml
