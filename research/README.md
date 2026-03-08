@@ -2,7 +2,7 @@
 
 Proves nodemode can support popular Node.js tools that **require shell + filesystem** — things impossible on vanilla Cloudflare Workers.
 
-## Results: 168 conformance tests passing
+## Results: 168 conformance tests passing (235 total with unit tests)
 
 | Tool | Stars | What it needs | Tests | Status |
 |------|-------|---------------|-------|--------|
