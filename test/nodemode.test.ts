@@ -389,6 +389,119 @@ describe("nodemode", () => {
     expect(data.status).toBe("stopped");
   });
 
+  // -- Shell operator tests --
+
+  it("executes piped commands (echo | grep)", async () => {
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/exec`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: "echo hello world | grep hello" }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const result = (await res.json()) as {
+      exitCode: number;
+      stdout: string;
+    };
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("hello world");
+  });
+
+  it("executes piped commands (cat file | head)", async () => {
+    // Write a multi-line file first
+    await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/fs/write`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path: "lines.txt",
+          content: "line1\nline2\nline3\nline4\nline5\n",
+        }),
+      },
+    );
+
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/exec`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: "cat lines.txt | head -n 2" }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const result = (await res.json()) as {
+      exitCode: number;
+      stdout: string;
+    };
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("line1");
+    expect(result.stdout).toContain("line2");
+    expect(result.stdout).not.toContain("line3");
+  });
+
+  it("executes chained commands with &&", async () => {
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/exec`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: "echo first && echo second" }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const result = (await res.json()) as {
+      exitCode: number;
+      stdout: string;
+    };
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("first");
+    expect(result.stdout).toContain("second");
+  });
+
+  it("stops chain on && when first command fails", async () => {
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/exec`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          command: "cat nonexistent.txt && echo should-not-appear",
+        }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const result = (await res.json()) as {
+      exitCode: number;
+      stdout: string;
+      stderr: string;
+    };
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).not.toContain("should-not-appear");
+  });
+
+  it("executes ; chain regardless of exit code", async () => {
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/exec`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          command: "echo first; echo second",
+        }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const result = (await res.json()) as {
+      exitCode: number;
+      stdout: string;
+    };
+    expect(result.stdout).toContain("first");
+    expect(result.stdout).toContain("second");
+  });
+
   it("rejects index invalidation with invalid body", async () => {
     const res = await SELF.fetch(
       `http://localhost/workspace/${workspaceId}/index-invalidate`,

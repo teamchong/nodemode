@@ -77,6 +77,64 @@ export class ProcessManager {
 
   async exec(command: string, options: SpawnOptions = {}): Promise<SpawnResult> {
     validateCommand(command);
+
+    // Check for shell operators (chains and pipes)
+    const pipeline = splitPipeline(command);
+    if (pipeline.length > 1) {
+      return this.execPipeline(pipeline, options);
+    }
+
+    const chain = splitChain(command);
+    if (chain.length > 1) {
+      return this.execChain(chain, options);
+    }
+
+    return this.execSingle(command, options);
+  }
+
+  private async execPipeline(commands: string[], options: SpawnOptions): Promise<SpawnResult> {
+    let input = "";
+    let lastResult: SpawnResult = { exitCode: 0, stdout: "", stderr: "" };
+
+    for (const cmd of commands) {
+      const trimmed = cmd.trim();
+      if (!trimmed) continue;
+      // Feed previous stdout as stdin to next command (via grep/head/etc that read from stdin)
+      // For builtins, we pass the input as a virtual file "-"
+      lastResult = await this.execSingle(trimmed, { ...options, stdin: input });
+      input = lastResult.stdout;
+      if (lastResult.exitCode !== 0) break;
+    }
+
+    return lastResult;
+  }
+
+  private async execChain(segments: ChainSegment[], options: SpawnOptions): Promise<SpawnResult> {
+    let lastResult: SpawnResult = { exitCode: 0, stdout: "", stderr: "" };
+    const allStdout: string[] = [];
+    const allStderr: string[] = [];
+
+    for (const { command, operator } of segments) {
+      const trimmed = command.trim();
+      if (!trimmed) continue;
+
+      // Check operator condition
+      if (operator === "&&" && lastResult.exitCode !== 0) break;
+      if (operator === "||" && lastResult.exitCode === 0) continue;
+
+      lastResult = await this.execSingle(trimmed, options);
+      if (lastResult.stdout) allStdout.push(lastResult.stdout);
+      if (lastResult.stderr) allStderr.push(lastResult.stderr);
+    }
+
+    return {
+      exitCode: lastResult.exitCode,
+      stdout: allStdout.join(""),
+      stderr: allStderr.join(""),
+    };
+  }
+
+  private async execSingle(command: string, options: SpawnOptions): Promise<SpawnResult> {
     const { cmd, args } = parseCommand(command);
     const effectiveCwd = options.cwd || this.cwd;
 
@@ -198,17 +256,17 @@ export class ProcessManager {
         );
 
       case "cat":
-        return this.builtinCat(args, cwd);
+        return this.builtinCat(args, cwd, options);
       case "ls":
         return this.builtinLs(args, cwd);
       case "head":
-        return this.builtinHead(args, cwd);
+        return this.builtinHead(args, cwd, options);
       case "tail":
-        return this.builtinTail(args, cwd);
+        return this.builtinTail(args, cwd, options);
       case "wc":
-        return this.builtinWc(args, cwd);
+        return this.builtinWc(args, cwd, options);
       case "grep":
-        return this.builtinGrep(args, cwd);
+        return this.builtinGrep(args, cwd, options);
       case "mkdir":
         return this.builtinMkdir(args, cwd);
       case "rm":
@@ -246,10 +304,18 @@ export class ProcessManager {
     }
   }
 
-  private async builtinCat(args: string[], cwd: string): Promise<SpawnResult> {
+  private async builtinCat(args: string[], cwd: string, options?: SpawnOptions): Promise<SpawnResult> {
+    const files = args.filter((a) => !a.startsWith("-"));
+    // No files: pass through stdin (pipe support)
+    if (files.length === 0 && options?.stdin) {
+      return ok(options.stdin);
+    }
     const outputs: string[] = [];
-    for (const arg of args) {
-      if (arg.startsWith("-")) continue;
+    for (const arg of files) {
+      if (arg === "-" && options?.stdin) {
+        outputs.push(options.stdin);
+        continue;
+      }
       const path = resolvePath(cwd, arg);
       const content = await this.fs.readFileText(path);
       if (content === null) {
@@ -287,7 +353,7 @@ export class ProcessManager {
     return ok(filtered.map((e) => e.name).join("\n") + "\n");
   }
 
-  private async builtinHead(args: string[], cwd: string): Promise<SpawnResult> {
+  private async builtinHead(args: string[], cwd: string, options?: SpawnOptions): Promise<SpawnResult> {
     let lines = 10;
     const files: string[] = [];
     for (let i = 0; i < args.length; i++) {
@@ -297,14 +363,21 @@ export class ProcessManager {
         files.push(args[i]);
       }
     }
-    if (files.length === 0) return ok("");
-    const path = resolvePath(cwd, files[0]);
-    const content = await this.fs.readFileText(path);
-    if (content === null) return fail(`head: ${files[0]}: No such file or directory\n`);
+    let content: string;
+    if (files.length > 0) {
+      const path = resolvePath(cwd, files[0]);
+      const fileContent = await this.fs.readFileText(path);
+      if (fileContent === null) return fail(`head: ${files[0]}: No such file or directory\n`);
+      content = fileContent;
+    } else if (options?.stdin) {
+      content = options.stdin;
+    } else {
+      return ok("");
+    }
     return ok(content.split("\n").slice(0, lines).join("\n") + "\n");
   }
 
-  private async builtinTail(args: string[], cwd: string): Promise<SpawnResult> {
+  private async builtinTail(args: string[], cwd: string, options?: SpawnOptions): Promise<SpawnResult> {
     let lines = 10;
     const files: string[] = [];
     for (let i = 0; i < args.length; i++) {
@@ -314,39 +387,67 @@ export class ProcessManager {
         files.push(args[i]);
       }
     }
-    if (files.length === 0) return ok("");
-    const path = resolvePath(cwd, files[0]);
-    const content = await this.fs.readFileText(path);
-    if (content === null) return fail(`tail: ${files[0]}: No such file or directory\n`);
+    let content: string;
+    if (files.length > 0) {
+      const path = resolvePath(cwd, files[0]);
+      const fileContent = await this.fs.readFileText(path);
+      if (fileContent === null) return fail(`tail: ${files[0]}: No such file or directory\n`);
+      content = fileContent;
+    } else if (options?.stdin) {
+      content = options.stdin;
+    } else {
+      return ok("");
+    }
     const allLines = content.split("\n");
     return ok(allLines.slice(-lines).join("\n") + "\n");
   }
 
-  private async builtinWc(args: string[], cwd: string): Promise<SpawnResult> {
+  private async builtinWc(args: string[], cwd: string, options?: SpawnOptions): Promise<SpawnResult> {
     const files = args.filter((a) => !a.startsWith("-"));
-    if (files.length === 0) return ok("0 0 0\n");
-    const path = resolvePath(cwd, files[0]);
-    const content = await this.fs.readFileText(path);
-    if (content === null) return fail(`wc: ${files[0]}: No such file or directory\n`);
+    let content: string;
+    let label: string;
+    if (files.length > 0) {
+      const path = resolvePath(cwd, files[0]);
+      const fileContent = await this.fs.readFileText(path);
+      if (fileContent === null) return fail(`wc: ${files[0]}: No such file or directory\n`);
+      content = fileContent;
+      label = files[0];
+    } else if (options?.stdin) {
+      content = options.stdin;
+      label = "";
+    } else {
+      return ok("0 0 0\n");
+    }
     const lineCount = content.split("\n").length - (content.endsWith("\n") ? 1 : 0);
     const wordCount = content.split(/\s+/).filter(Boolean).length;
     const byteCount = new TextEncoder().encode(content).byteLength;
-    return ok(`${lineCount} ${wordCount} ${byteCount} ${files[0]}\n`);
+    const suffix = label ? ` ${label}` : "";
+    return ok(`${lineCount} ${wordCount} ${byteCount}${suffix}\n`);
   }
 
-  private async builtinGrep(args: string[], cwd: string): Promise<SpawnResult> {
-    // Simple grep: grep pattern file
+  private async builtinGrep(args: string[], cwd: string, options?: SpawnOptions): Promise<SpawnResult> {
+    // Simple grep: grep pattern [file]
+    // If no file, reads from stdin (piped input)
     const nonFlags = args.filter((a) => !a.startsWith("-"));
-    if (nonFlags.length < 2) {
-      return fail("grep: usage: grep PATTERN FILE\n");
+    if (nonFlags.length < 1) {
+      return fail("grep: usage: grep PATTERN [FILE]\n");
     }
     const pattern = nonFlags[0];
-    const file = nonFlags[1];
-    const path = resolvePath(cwd, file);
-    const content = await this.fs.readFileText(path);
-    if (content === null) return fail(`grep: ${file}: No such file or directory\n`);
-
     const caseInsensitive = args.includes("-i");
+
+    let content: string;
+    if (nonFlags.length >= 2) {
+      const file = nonFlags[1];
+      const path = resolvePath(cwd, file);
+      const fileContent = await this.fs.readFileText(path);
+      if (fileContent === null) return fail(`grep: ${file}: No such file or directory\n`);
+      content = fileContent;
+    } else if (options?.stdin) {
+      content = options.stdin;
+    } else {
+      return fail("grep: usage: grep PATTERN [FILE]\n");
+    }
+
     const regex = new RegExp(pattern, caseInsensitive ? "i" : "");
     const matches = content.split("\n").filter((line) => regex.test(line));
     if (matches.length === 0) return { exitCode: 1, stdout: "", stderr: "" };
@@ -454,6 +555,71 @@ function ok(stdout: string): SpawnResult {
 
 function fail(stderr: string): SpawnResult {
   return { exitCode: 1, stdout: "", stderr };
+}
+
+interface ChainSegment {
+  command: string;
+  operator: ";" | "&&" | "||" | "";
+}
+
+function splitPipeline(command: string): string[] {
+  // Split on | but not || and not inside quotes
+  const parts: string[] = [];
+  let current = "";
+  let inSingle = false;
+  let inDouble = false;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === "'" && !inDouble) { inSingle = !inSingle; current += ch; }
+    else if (ch === '"' && !inSingle) { inDouble = !inDouble; current += ch; }
+    else if (ch === "|" && !inSingle && !inDouble && command[i + 1] !== "|" && (i === 0 || command[i - 1] !== "|")) {
+      parts.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  if (current) parts.push(current);
+  return parts;
+}
+
+function splitChain(command: string): ChainSegment[] {
+  // Split on &&, ||, ; outside quotes
+  const segments: ChainSegment[] = [];
+  let current = "";
+  let inSingle = false;
+  let inDouble = false;
+  let pendingOp: ChainSegment["operator"] = "";
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === "'" && !inDouble) { inSingle = !inSingle; current += ch; continue; }
+    if (ch === '"' && !inSingle) { inDouble = !inDouble; current += ch; continue; }
+    if (inSingle || inDouble) { current += ch; continue; }
+
+    if (ch === "&" && command[i + 1] === "&") {
+      segments.push({ command: current.trim(), operator: pendingOp });
+      current = "";
+      pendingOp = "&&";
+      i++; // skip second &
+    } else if (ch === "|" && command[i + 1] === "|") {
+      segments.push({ command: current.trim(), operator: pendingOp });
+      current = "";
+      pendingOp = "||";
+      i++; // skip second |
+    } else if (ch === ";") {
+      segments.push({ command: current.trim(), operator: pendingOp });
+      current = "";
+      pendingOp = ";";
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim()) {
+    segments.push({ command: current.trim(), operator: pendingOp });
+  }
+  return segments;
 }
 
 function parseCommand(command: string): { cmd: string; args: string[] } {
