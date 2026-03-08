@@ -35,6 +35,8 @@ export interface ProcessHandle {
 }
 
 // Commands handled entirely in-DO (no Container needed)
+const MAX_PROCESS_ROWS = 1000;
+
 const BUILTIN_COMMANDS = new Set([
   "echo",
   "cat",
@@ -178,6 +180,7 @@ export class ProcessManager {
         pid,
       );
 
+      this.pruneProcessTable();
       return result;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -187,7 +190,22 @@ export class ProcessManager {
         Date.now(),
         pid,
       );
+      this.pruneProcessTable();
       return { exitCode: 1, stdout: "", stderr: msg };
+    }
+  }
+
+  private pruneProcessTable(): void {
+    const count = this.sql
+      .exec("SELECT COUNT(*) as cnt FROM processes")
+      .toArray()[0].cnt as number;
+    if (count > MAX_PROCESS_ROWS) {
+      this.sql.exec(
+        `DELETE FROM processes WHERE pid IN (
+           SELECT pid FROM processes WHERE status != 'running' ORDER BY pid ASC LIMIT ?
+         )`,
+        count - MAX_PROCESS_ROWS,
+      );
     }
   }
 
@@ -448,7 +466,18 @@ export class ProcessManager {
       return fail("grep: usage: grep PATTERN [FILE]\n");
     }
 
-    const regex = new RegExp(pattern, caseInsensitive ? "i" : "");
+    let regex: RegExp;
+    try {
+      regex = new RegExp(pattern, caseInsensitive ? "i" : "");
+    } catch {
+      // Fall back to literal string match if regex is invalid
+      const test = caseInsensitive
+        ? (line: string) => line.toLowerCase().includes(pattern.toLowerCase())
+        : (line: string) => line.includes(pattern);
+      const matches = content.split("\n").filter(test);
+      if (matches.length === 0) return { exitCode: 1, stdout: "", stderr: "" };
+      return ok(matches.join("\n") + "\n");
+    }
     const matches = content.split("\n").filter((line) => regex.test(line));
     if (matches.length === 0) return { exitCode: 1, stdout: "", stderr: "" };
     return ok(matches.join("\n") + "\n");
@@ -486,8 +515,7 @@ export class ProcessManager {
       if (!this.fs.exists(path)) {
         await this.fs.writeFile(path, "");
       } else {
-        // Update mtime
-        this.fs.chmod(path, this.fs.stat(path)!.mode);
+        this.fs.touch(path);
       }
     }
     return ok("");

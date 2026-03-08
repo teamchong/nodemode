@@ -95,13 +95,18 @@ export function createHandler(options: HandlerOptions = {}) {
       if (apiMatch) {
         const [, workspaceId, action] = apiMatch;
 
-        // List workspaces via R2 prefix scan
+        // List workspaces via R2 prefix scan (paginated)
         if (!workspaceId) {
-          const listed = await env.FS_BUCKET.list({ delimiter: "/" });
-          const workspaces = listed.delimitedPrefixes.map((prefix) =>
-            prefix.replace(/\/$/, ""),
-          );
-          const response = new Response(JSON.stringify({ workspaces }), {
+          const allPrefixes: string[] = [];
+          let cursor: string | undefined;
+          do {
+            const listed = await env.FS_BUCKET.list({ delimiter: "/", cursor });
+            for (const prefix of listed.delimitedPrefixes) {
+              allPrefixes.push(prefix.replace(/\/$/, ""));
+            }
+            cursor = listed.truncated ? listed.cursor : undefined;
+          } while (cursor);
+          const response = new Response(JSON.stringify({ workspaces: allPrefixes }), {
             headers: { "Content-Type": "application/json" },
           });
           return cors ? withCors(response) : response;

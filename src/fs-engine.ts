@@ -321,6 +321,12 @@ export class FsEngine {
     this.sql.exec("UPDATE files SET mode = ? WHERE path = ?", mode, normalized);
   }
 
+  touch(path: string): void {
+    const normalized = normalizePath(path);
+    validatePath(normalized);
+    this.sql.exec("UPDATE files SET mtime = ? WHERE path = ?", Date.now(), normalized);
+  }
+
   // -- Rename --
 
   async rename(oldPath: string, newPath: string): Promise<void> {
@@ -331,7 +337,7 @@ export class FsEngine {
     const oldKey = this.r2Key(oldNorm);
     const newKey = this.r2Key(newNorm);
 
-    const stat = this.stat(oldPath);
+    const stat = this.stat(oldNorm);
     if (!stat) throw new Error(`ENOENT: no such file '${oldPath}'`);
 
     if (stat.isDirectory) {
