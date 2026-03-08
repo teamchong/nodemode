@@ -13,10 +13,17 @@
     }
   ],
 
-  // Durable Objects: per-workspace process manager + filesystem index
+  // Durable Objects: per-workspace coordinator with embedded Container
   "durable_objects": {
     "bindings": [
-      { "name": "WORKSPACE", "class_name": "Workspace" }
+      {
+        "name": "WORKSPACE",
+        "class_name": "Workspace",
+        "container": {
+          "image": "./container/Dockerfile",
+          "max_instances": 10
+        }
+      }
     ]
   },
 

@@ -62,11 +62,17 @@ const BUILTIN_COMMANDS = new Set([
   "sleep",
 ]);
 
+export type ContainerExecFn = (
+  command: string,
+  options: { cwd?: string; env?: Record<string, string> },
+) => Promise<SpawnResult>;
+
 export class ProcessManager {
   constructor(
     private sql: SqlStorage,
     private fs: FsEngine,
     private cwd: string = "/",
+    private containerExec?: ContainerExecFn,
   ) {}
 
   async exec(command: string, options: SpawnOptions = {}): Promise<SpawnResult> {
@@ -91,12 +97,16 @@ export class ProcessManager {
 
       if (BUILTIN_COMMANDS.has(cmd)) {
         result = await this.execBuiltin(cmd, args, effectiveCwd, options);
+      } else if (this.containerExec) {
+        result = await this.containerExec(command, {
+          cwd: effectiveCwd,
+          env: options.env,
+        });
       } else {
-        // TODO: Container execution for heavy commands
         result = {
           exitCode: 127,
           stdout: "",
-          stderr: `nodemode: command not found: ${cmd}\nContainer execution not yet implemented. Available built-in commands: ${[...BUILTIN_COMMANDS].join(", ")}`,
+          stderr: `nodemode: command not found: ${cmd}\nNo container available. Built-in commands: ${[...BUILTIN_COMMANDS].join(", ")}`,
         };
       }
 

@@ -20,4 +20,5 @@ export { ValidationError, validatePath, validateCommand } from "./validate";
 export type { Env } from "./env";
 export type { FileStat, DirEntry } from "./fs-engine";
 export type { HandlerOptions } from "./handler";
-export type { SpawnOptions, SpawnResult, ProcessHandle } from "./process-manager";
+export type { SpawnOptions, SpawnResult, ProcessHandle, ContainerExecFn } from "./process-manager";
+export type { ContainerStatus, ContainerExecRequest, ContainerExecResult } from "./container";
