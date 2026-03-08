@@ -84,15 +84,16 @@ export class ProcessManager {
   async exec(command: string, options: SpawnOptions = {}): Promise<SpawnResult> {
     validateCommand(command);
 
-    // Check for shell operators (chains and pipes)
-    const pipeline = splitPipeline(command);
-    if (pipeline.length > 1) {
-      return this.execPipeline(pipeline, options);
-    }
-
+    // Shell precedence: chains (&&, ||, ;) bind looser than pipes (|)
+    // So split on chains first, then handle pipes within each segment.
     const chain = splitChain(command);
     if (chain.length > 1) {
       return this.execChain(chain, options);
+    }
+
+    const pipeline = splitPipeline(command);
+    if (pipeline.length > 1) {
+      return this.execPipeline(pipeline, options);
     }
 
     return this.execSingle(command, options);
@@ -128,7 +129,12 @@ export class ProcessManager {
       if (operator === "&&" && lastResult.exitCode !== 0) continue;
       if (operator === "||" && lastResult.exitCode === 0) continue;
 
-      lastResult = await this.execSingle(trimmed, options);
+      // Each chain segment may contain pipes, so route through full exec
+      // (which handles pipes before falling through to execSingle)
+      const pipeline = splitPipeline(trimmed);
+      lastResult = pipeline.length > 1
+        ? await this.execPipeline(pipeline, options)
+        : await this.execSingle(trimmed, options);
       if (lastResult.stdout) allStdout.push(lastResult.stdout);
       if (lastResult.stderr) allStderr.push(lastResult.stderr);
     }

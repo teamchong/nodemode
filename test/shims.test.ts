@@ -239,6 +239,16 @@ describe("child_process shim (via HTTP — same backing as node:child_process sh
     expect(data.stdout).toContain("c");
   });
 
+  it("exec chain with pipe in segment", async () => {
+    await fsWrite("chain-pipe.txt", "alpha\nbeta\ngamma\n");
+    const res = await exec("echo start && cat chain-pipe.txt | grep beta");
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { stdout: string };
+    expect(data.stdout).toContain("start");
+    expect(data.stdout).toContain("beta");
+    expect(data.stdout).not.toContain("alpha");
+  });
+
   it("exec cat reads file", async () => {
     await fsWrite("cat-test.txt", "cat content");
     const res = await exec("cat cat-test.txt");
