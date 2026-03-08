@@ -17,6 +17,7 @@ export default defineConfig({
       sidebar: [
         { label: "Overview", slug: "index" },
         { label: "Getting Started", slug: "getting-started" },
+        { label: "Module Shims", slug: "shims" },
         { label: "Architecture", slug: "architecture" },
         { label: "Filesystem (fs)", slug: "filesystem" },
         { label: "Child Process", slug: "child-process" },

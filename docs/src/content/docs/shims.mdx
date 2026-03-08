@@ -1,0 +1,196 @@
+---
+title: Module Shims
+description: Experimental node:fs and node:child_process shims for Cloudflare Workers
+---
+
+> **Experimental** — these shims cover common API surface but not the full Node.js spec. Many libraries will need testing.
+
+## Approach
+
+Inspired by [vinext](https://github.com/cloudflare/vinext) shimming `next/*` imports, nodemode experiments with shimming `node:fs` and `node:child_process` — replacing them with implementations backed by R2 and DO SQLite.
+
+## Setup
+
+Add module aliases to your `wrangler.jsonc`:
+
+```jsonc
+{
+  "alias": {
+    "fs": "nodemode/shims/fs",
+    "child_process": "nodemode/shims/child_process"
+  }
+}
+```
+
+That's it. Any library in your Worker that does `import fs from "node:fs"` or `require("fs")` now gets nodemode's implementation.
+
+## How it works
+
+```
+npm package does: import { readFile } from "node:fs"
+                           │
+                           ▼  wrangler alias resolves to
+                nodemode/shims/fs.ts
+                           │
+                           ▼  calls
+                FsEngine.readFile(path)
+                           │
+                    ┌──────┴──────┐
+                    ▼             ▼
+             SQLite cache     R2 bucket
+              (<1ms)          (10-50ms)
+```
+
+The shims bind to the active Workspace DO's `FsEngine` and `ProcessManager` via a context singleton. The `Workspace` DO calls `setContext()` on construction, so shims are ready before any user code runs.
+
+## fs shim API coverage
+
+### Async (callback) API
+
+```ts
+import fs from "node:fs";
+
+fs.readFile("config.json", "utf-8", (err, data) => { ... });
+fs.writeFile("output.txt", "content", (err) => { ... });
+fs.appendFile("log.txt", "new line\n", (err) => { ... });
+fs.stat("file.ts", (err, stats) => { console.log(stats.size); });
+fs.readdir("src", (err, files) => { ... });
+fs.mkdir("dist", { recursive: true }, (err) => { ... });
+fs.unlink("old.ts", (err) => { ... });
+fs.rename("a.ts", "b.ts", (err) => { ... });
+fs.copyFile("src.ts", "dest.ts", (err) => { ... });
+fs.rm("dir", { recursive: true }, (err) => { ... });
+fs.rmdir("dir", { recursive: true }, (err) => { ... });
+fs.chmod("file.ts", 0o755, (err) => { ... });
+fs.access("file.ts", (err) => { /* err if not found */ });
+fs.lstat("file.ts", (err, stats) => { ... }); // same as stat (no symlinks)
+```
+
+### Promises API
+
+```ts
+import { promises as fs } from "node:fs";
+// or: import fs from "node:fs/promises";
+
+const data = await fs.readFile("config.json", "utf-8");
+await fs.writeFile("output.txt", "content");
+await fs.appendFile("log.txt", "new line\n");
+const stats = await fs.stat("file.ts");
+const files = await fs.readdir("src");
+await fs.mkdir("dist", { recursive: true });
+await fs.unlink("old.ts");
+await fs.rename("a.ts", "b.ts");
+await fs.copyFile("src.ts", "dest.ts");
+await fs.rm("dir", { recursive: true, force: true });
+await fs.chmod("file.ts", 0o755);
+await fs.access("file.ts"); // throws if not found
+```
+
+### Sync API
+
+```ts
+import fs from "node:fs";
+
+fs.existsSync("file.ts");           // works — SQLite lookup
+fs.mkdirSync("dir", { recursive: true });  // works — SQLite insert
+fs.readdirSync("src");              // works — SQLite query
+fs.statSync("file.ts");             // works — SQLite lookup
+fs.lstatSync("file.ts");            // works — same as statSync
+```
+
+`readFileSync` and `writeFileSync` throw — R2 is async-only. Use `fs.promises` instead.
+
+### Stats object
+
+The `Stats` object returned by `stat`/`statSync` supports:
+
+```ts
+stats.size        // file size in bytes
+stats.mode        // file permissions
+stats.mtime       // Date object
+stats.mtimeMs     // milliseconds
+stats.isFile()    // true if not directory
+stats.isDirectory() // true if directory
+stats.isSymbolicLink() // always false
+```
+
+## child_process shim API coverage
+
+### exec
+
+```ts
+import { exec } from "node:child_process";
+
+exec("cat file.txt | grep pattern", (err, stdout, stderr) => {
+  console.log(stdout); // matched lines
+});
+
+exec("ls -la", { cwd: "/project", env: { NODE_ENV: "test" } }, (err, stdout) => {
+  console.log(stdout);
+});
+```
+
+### spawn
+
+```ts
+import { spawn } from "node:child_process";
+
+const child = spawn("grep", ["ERROR", "log.txt"]);
+
+child.stdout.on("data", (data) => {
+  console.log("stdout:", data);
+});
+
+child.stderr.on("data", (data) => {
+  console.error("stderr:", data);
+});
+
+child.on("close", (code) => {
+  console.log("exit code:", code);
+});
+```
+
+### execFile
+
+```ts
+import { execFile } from "node:child_process";
+
+execFile("cat", ["file1.txt", "file2.txt"], (err, stdout) => {
+  console.log(stdout);
+});
+```
+
+### What runs where
+
+| Command | Where | Cost | Latency |
+|---------|-------|------|---------|
+| `echo`, `cat`, `ls`, `grep`, `head`, `tail`, `wc`, `mkdir`, `rm`, `cp`, `mv`, `touch`, `test`, `which`, `pwd`, `env`, `whoami`, `date`, `basename`, `dirname`, `printf`, `sleep`, `true`, `false` | DO (built-in) | $0 | &lt;1ms |
+| `npm`, `node`, `git`, `tsc`, `esbuild`, `python`, `cargo`, etc. | Container | ~$0.02/hr | seconds |
+
+## Not supported
+
+| API | Why |
+|-----|-----|
+| `fs.readFileSync` / `writeFileSync` | R2 is async-only. Use `fs.promises` |
+| `fs.watch` / `watchFile` | No file watching in DO |
+| `fs.createReadStream` / `createWriteStream` | Use `readFile`/`writeFile` or the REST streaming API |
+| `child_process.fork` | Workers are single-threaded |
+| `child_process.execSync` | DO execution is async |
+| Symlinks | R2 has no symlink concept |
+
+## Custom context
+
+If you're using nodemode outside the built-in `Workspace` DO, bind the context manually:
+
+```ts
+import { setContext, clearContext } from "nodemode";
+
+// In your DO constructor or request handler:
+setContext(myFsEngine, myProcessManager);
+
+// Run your code that uses node:fs / node:child_process shims
+await runUserCode();
+
+// Optional cleanup
+clearContext();
+```

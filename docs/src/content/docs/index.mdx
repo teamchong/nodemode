@@ -1,15 +1,16 @@
 ---
 title: nodemode
-description: Node.js runtime on Cloudflare Workers — R2 filesystem, DO child_process, Container execution
+description: Experimental Node.js module shims for Cloudflare Workers
 ---
 
-**nodemode** maps Node.js primitives to Cloudflare primitives, giving you a serverless Node.js environment with real `fs`, `child_process`, and shell — things impossible on vanilla Cloudflare Workers.
+> **Experimental** — research prototype, not production-ready.
 
-## Why nodemode?
+**nodemode** is an experiment in making `node:fs` and `node:child_process` work on Cloudflare Workers by shimming them with R2 + DO SQLite — the same approach [vinext](https://github.com/cloudflare/vinext) uses to make `next/*` imports work on Workers.
 
-Cloudflare Workers have no `fs`, no `child_process`, and no shell. Web frameworks like Next.js work fine on Workers (via [vinext](https://github.com/cloudflare/vinext) or OpenNext), but dev tools, CLI scripts, build systems, and AI coding agents that need the filesystem and shell cannot run at all.
+## The problem
 
-nodemode bridges this gap:
+Cloudflare Workers have no `fs`, no `child_process`, and no shell. Web frameworks work fine (vinext, OpenNext), but tools that need the filesystem and process spawning cannot run at all:
+
 
 | Tool | What it needs | Workers alone | With nodemode |
 |------|--------------|---------------|---------------|
@@ -32,9 +33,9 @@ nodemode bridges this gap:
 | `stdin` / `stdout` / `stderr` | WebSocket + DO SQLite buffer | Working |
 | `process.env` | Worker env / Secrets | Working |
 
-## Conformance: 235 tests passing
+## Conformance tests
 
-Proves nodemode can support popular Node.js tools:
+235 tests verify the approach against patterns from popular tools:
 
 | Tool | Tests | Status |
 |------|-------|--------|
