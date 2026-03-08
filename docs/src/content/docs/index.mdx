@@ -70,15 +70,36 @@ await nm.writeFile("index.ts", "console.log('hello');");
 const result = await nm.exec("cat index.ts | grep hello");
 ```
 
-## How nodemode differs from vinext
+## Module Shims — The vinext Approach for Node.js APIs
 
-**vinext** reimplements the Next.js API surface on Vite so Next.js apps can deploy to Workers. It solves "run my web framework on the edge" — web frameworks don't need `fs` or `child_process`.
+Just as [vinext](https://github.com/cloudflare/vinext) shims `next/*` imports so Next.js apps run on Workers, nodemode shims `node:fs` and `node:child_process` so Node.js tools run on Workers.
 
-**nodemode** provides `fs`, `child_process`, and shell primitives that Workers lack. It solves "run my dev tools, build systems, and CLI scripts on the edge."
+Configure wrangler to alias Node.js modules to nodemode's shims:
 
-They are complementary:
-- vinext = run Next.js apps on Workers (no shell needed)
-- nodemode = run tools that need shell + filesystem on Workers (zx, git, npm, AI agents)
+```jsonc
+// wrangler.jsonc
+{
+  "alias": {
+    "fs": "nodemode/shims/fs",
+    "child_process": "nodemode/shims/child_process"
+  }
+}
+```
+
+Now any library that does `import fs from "node:fs"` or `import { exec } from "node:child_process"` transparently gets nodemode's R2+SQLite implementation — no Container needed, $0 cost, &lt;1ms for cached reads.
+
+```ts
+// This library code works unchanged on Workers:
+import { readFileSync } from "node:fs";    // → nodemode R2+SQLite
+import { exec } from "node:child_process"; // → nodemode ProcessManager
+```
+
+| Approach | vinext | nodemode |
+|----------|--------|----------|
+| Shims | `next/link`, `next/router`, `next/image` | `node:fs`, `node:child_process` |
+| Enables | Next.js apps on Workers | Node.js tools on Workers |
+| How | Reimplements Next.js API on Vite | Reimplements Node.js API on R2+SQLite+DO |
+| Cost | $0 (Worker) | $0 (built-in commands in DO) |
 
 ## Related Projects
 

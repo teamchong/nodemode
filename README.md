@@ -47,6 +47,27 @@ const result = await nm.exec("cat index.ts");
 // { exitCode: 0, stdout: "console.log('hello');", stderr: "" }
 ```
 
+## Module Shims — The vinext Approach
+
+Like [vinext](https://github.com/cloudflare/vinext) shims `next/*` imports for Workers, nodemode shims `node:fs` and `node:child_process`:
+
+```jsonc
+// wrangler.jsonc
+{
+  "alias": {
+    "fs": "nodemode/shims/fs",
+    "child_process": "nodemode/shims/child_process"
+  }
+}
+```
+
+Libraries that `import fs from "node:fs"` or `import { exec } from "node:child_process"` transparently get nodemode's R2+SQLite implementation — no Container, $0 cost.
+
+| vinext | nodemode |
+|--------|----------|
+| Shims `next/link`, `next/router`, `next/image` | Shims `node:fs`, `node:child_process` |
+| Next.js apps on Workers | Node.js tools on Workers |
+
 ## Architecture
 
 Commands are tiered:
