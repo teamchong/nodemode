@@ -280,4 +280,160 @@ describe("zx conformance", () => {
     const gone = await exists("cleanup/old.txt");
     expect(gone).toBe(false);
   });
+
+  // -----------------------------------------------------------------------
+  // Pattern 13: Complex pipes (3+ stages)
+  // zx: await $`cat file | grep pattern | head -n 5`
+  // -----------------------------------------------------------------------
+  it("three-stage pipe: cat | grep | head", async () => {
+    await writeFile("access.log", [
+      "200 GET /api/users",
+      "404 GET /api/missing",
+      "200 GET /api/posts",
+      "500 GET /api/error",
+      "200 GET /api/comments",
+      "200 GET /api/tags",
+      "200 GET /api/auth",
+    ].join("\n") + "\n");
+
+    const result = await exec("cat access.log | grep 200 | head -n 3");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("/api/users");
+    expect(result.stdout).toContain("/api/posts");
+    expect(result.stdout).toContain("/api/comments");
+    expect(result.stdout).not.toContain("/api/tags");
+    expect(result.stdout).not.toContain("404");
+  });
+
+  // -----------------------------------------------------------------------
+  // Pattern 14: wc for counting pipe results
+  // zx: const count = (await $`cat file | grep pattern | wc -l`).stdout.trim()
+  // -----------------------------------------------------------------------
+  it("pipe: cat | grep | wc for counting matches", async () => {
+    const result = await exec("cat access.log | grep 200 | wc");
+    expect(result.exitCode).toBe(0);
+    // 5 lines contain "200"
+    expect(result.stdout).toContain("5");
+  });
+
+  // -----------------------------------------------------------------------
+  // Pattern 15: Conditional execution patterns
+  // zx: await $`test -f file && cat file || echo "not found"`
+  // -----------------------------------------------------------------------
+  it("test && cat || echo pattern (file exists)", async () => {
+    await writeFile("config.txt", "key=value");
+    const result = await exec("test -f config.txt && cat config.txt || echo not found");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("key=value");
+    expect(result.stdout).not.toContain("not found");
+  });
+
+  it("test && cat || echo pattern (file missing)", async () => {
+    const result = await exec("test -f missing.txt && cat missing.txt || echo not found");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("not found");
+  });
+
+  // -----------------------------------------------------------------------
+  // Pattern 16: Building paths with basename/dirname
+  // zx: const dir = path.dirname(file); const base = path.basename(file)
+  // -----------------------------------------------------------------------
+  it("basename extracts filename", async () => {
+    const result = await exec("basename /home/user/project/src/index.ts");
+    expect(result.stdout.trim()).toBe("index.ts");
+  });
+
+  it("dirname extracts directory", async () => {
+    const result = await exec("dirname /home/user/project/src/index.ts");
+    expect(result.stdout.trim()).toBe("/home/user/project/src");
+  });
+
+  // -----------------------------------------------------------------------
+  // Pattern 17: touch for creating marker files
+  // zx: await $`touch .build-complete`
+  // -----------------------------------------------------------------------
+  it("touch creates marker files", async () => {
+    const result = await exec("touch .build-started");
+    expect(result.exitCode).toBe(0);
+    expect(await exists(".build-started")).toBe(true);
+  });
+
+  it("touch on existing file updates it", async () => {
+    await writeFile("existing.txt", "data");
+    const result = await exec("touch existing.txt");
+    expect(result.exitCode).toBe(0);
+    // File still exists with same content
+    const data = await readFile("existing.txt");
+    expect(data.content).toBe("data");
+  });
+
+  // -----------------------------------------------------------------------
+  // Pattern 18: which command for tool detection
+  // zx: const hasGit = await which('git').catch(() => null)
+  // -----------------------------------------------------------------------
+  it("which finds builtin commands", async () => {
+    const echo = await exec("which echo");
+    expect(echo.exitCode).toBe(0);
+    expect(echo.stdout).toContain("/usr/bin/echo");
+
+    const grep = await exec("which grep");
+    expect(grep.exitCode).toBe(0);
+  });
+
+  it("which reports missing for non-builtins", async () => {
+    const result = await exec("which docker");
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("not found");
+  });
+
+  // -----------------------------------------------------------------------
+  // Pattern 19: Multi-file write + verify loop
+  // zx: for (const f of files) { await fs.writeFile(f, content) }
+  // -----------------------------------------------------------------------
+  it("writes multiple files and verifies all exist", async () => {
+    const files = ["batch/a.txt", "batch/b.txt", "batch/c.txt", "batch/d.txt", "batch/e.txt"];
+    await exec("mkdir -p batch");
+    for (let i = 0; i < files.length; i++) {
+      await writeFile(files[i], `content-${i}`);
+    }
+
+    for (let i = 0; i < files.length; i++) {
+      expect(await exists(files[i])).toBe(true);
+      const data = await readFile(files[i]);
+      expect(data.content).toBe(`content-${i}`);
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Pattern 20: Single-quoted strings preserved in pipes
+  // -----------------------------------------------------------------------
+  it("handles single-quoted args", async () => {
+    const result = await exec("echo 'hello world with spaces'");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("hello world with spaces");
+  });
+
+  it("handles double-quoted args", async () => {
+    const result = await exec('echo "double quoted string"');
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("double quoted string");
+  });
+
+  // -----------------------------------------------------------------------
+  // Pattern 21: Process list inspection
+  // zx: check what ran
+  // -----------------------------------------------------------------------
+  it("process list tracks all zx-like commands", async () => {
+    const listRes = await SELF.fetch(`http://localhost/workspace/${W}/process/list`);
+    const processes = (await listRes.json()) as Array<{
+      pid: number;
+      command: string;
+      status: string;
+    }>;
+    expect(processes.length).toBeGreaterThan(10);
+    // All should be completed
+    for (const p of processes.slice(0, 20)) {
+      expect(p.status).toBe("done");
+    }
+  });
 });

@@ -284,4 +284,186 @@ describe("simple-git conformance", () => {
       expect(await exists("repo/.git/stash/index.ts")).toBe(false);
     });
   });
+
+  // =====================================================================
+  // PATTERN 8: Tag management
+  // simple-git: git.tag(['v1.0.0'])
+  // =====================================================================
+
+  describe("tag management", () => {
+    it("creates tag refs", async () => {
+      await exec("mkdir -p repo/.git/refs/tags");
+      await writeFile("repo/.git/refs/tags/v1.0.0", "abc123def456789\n");
+      await writeFile("repo/.git/refs/tags/v1.1.0", "def456789abc123\n");
+      await writeFile("repo/.git/refs/tags/v2.0.0", "789abc123def456\n");
+
+      expect(await exists("repo/.git/refs/tags/v1.0.0")).toBe(true);
+      expect(await exists("repo/.git/refs/tags/v2.0.0")).toBe(true);
+    });
+
+    it("lists all tags", async () => {
+      const entries = await readdir("repo/.git/refs/tags");
+      const tags = entries.map((e) => e.name);
+      expect(tags).toContain("v1.0.0");
+      expect(tags).toContain("v1.1.0");
+      expect(tags).toContain("v2.0.0");
+    });
+
+    it("reads tag to get commit hash", async () => {
+      const ref = await readFile("repo/.git/refs/tags/v1.0.0");
+      expect(ref.content.trim()).toBe("abc123def456789");
+    });
+
+    it("deletes a tag", async () => {
+      await exec("rm repo/.git/refs/tags/v1.1.0");
+      expect(await exists("repo/.git/refs/tags/v1.1.0")).toBe(false);
+
+      const entries = await readdir("repo/.git/refs/tags");
+      const tags = entries.map((e) => e.name);
+      expect(tags).not.toContain("v1.1.0");
+    });
+  });
+
+  // =====================================================================
+  // PATTERN 9: Remote tracking
+  // simple-git: git.remote(['add', 'origin', 'url'])
+  // =====================================================================
+
+  describe("remote tracking", () => {
+    it("writes remote config", async () => {
+      const config = [
+        "[core]",
+        "\trepositoryformatversion = 0",
+        "\tbare = false",
+        '[remote "origin"]',
+        "\turl = https://github.com/user/repo.git",
+        "\tfetch = +refs/heads/*:refs/remotes/origin/*",
+        '[branch "main"]',
+        "\tremote = origin",
+        "\tmerge = refs/heads/main",
+        "",
+      ].join("\n");
+      await writeFile("repo/.git/config", config);
+    });
+
+    it("reads remote URL from config", async () => {
+      const result = await exec("grep url repo/.git/config");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("github.com/user/repo.git");
+    });
+
+    it("creates remote tracking refs", async () => {
+      await exec("mkdir -p repo/.git/refs/remotes/origin");
+      await writeFile("repo/.git/refs/remotes/origin/main", "abc123def456789\n");
+      await writeFile("repo/.git/refs/remotes/origin/develop", "999888777666555\n");
+
+      const entries = await readdir("repo/.git/refs/remotes/origin");
+      const branches = entries.map((e) => e.name);
+      expect(branches).toContain("main");
+      expect(branches).toContain("develop");
+    });
+  });
+
+  // =====================================================================
+  // PATTERN 10: Merge conflict detection
+  // simple-git: git.merge() → detect conflicts via markers
+  // =====================================================================
+
+  describe("merge conflict handling", () => {
+    it("writes a file with conflict markers", async () => {
+      const conflicted = [
+        "function hello() {",
+        "<<<<<<< HEAD",
+        '  return "hello from main";',
+        "=======",
+        '  return "hello from feature";',
+        ">>>>>>> feature",
+        "}",
+        "",
+      ].join("\n");
+      await writeFile("repo/conflicted.ts", conflicted);
+    });
+
+    it("detects conflict markers with grep", async () => {
+      const head = await exec("grep HEAD repo/conflicted.ts");
+      expect(head.exitCode).toBe(0);
+      expect(head.stdout).toContain("<<<<<<< HEAD");
+
+      const separator = await exec("grep ======= repo/conflicted.ts");
+      expect(separator.exitCode).toBe(0);
+
+      const feature = await exec("grep feature repo/conflicted.ts");
+      expect(feature.exitCode).toBe(0);
+      expect(feature.stdout).toContain(">>>>>>> feature");
+    });
+
+    it("resolves conflict by rewriting file", async () => {
+      const resolved = [
+        "function hello() {",
+        '  return "hello from main (resolved)";',
+        "}",
+        "",
+      ].join("\n");
+      await writeFile("repo/conflicted.ts", resolved);
+
+      // Verify no conflict markers remain
+      const markers = await exec("grep <<<<<<< repo/conflicted.ts");
+      expect(markers.exitCode).toBe(1); // no match
+    });
+
+    it("writes MERGE_MSG for merge commit", async () => {
+      await writeFile(
+        "repo/.git/MERGE_MSG",
+        "Merge branch 'feature' into main\n\nResolved conflict in conflicted.ts\n",
+      );
+      const msg = await readFile("repo/.git/MERGE_MSG");
+      expect(msg.content).toContain("Merge branch");
+      expect(msg.content).toContain("conflicted.ts");
+    });
+  });
+
+  // =====================================================================
+  // PATTERN 11: Large file tracking simulation
+  // =====================================================================
+
+  describe("large file operations", () => {
+    it("writes and reads a larger file", async () => {
+      // Generate a file with 100 lines
+      const lines: string[] = [];
+      for (let i = 0; i < 100; i++) {
+        lines.push(`line ${i}: ${"x".repeat(80)}`);
+      }
+      const content = lines.join("\n") + "\n";
+      await writeFile("repo/large-file.txt", content);
+
+      const data = await readFile("repo/large-file.txt");
+      expect(data.content.split("\n").length).toBeGreaterThan(99);
+    });
+
+    it("head shows first 10 lines of large file", async () => {
+      const result = await exec("head repo/large-file.txt");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("line 0:");
+      expect(result.stdout).toContain("line 9:");
+      expect(result.stdout).not.toContain("line 10:");
+    });
+
+    it("tail shows last lines of large file", async () => {
+      const result = await exec("tail -n 3 repo/large-file.txt");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("line 99:");
+    });
+
+    it("wc counts lines accurately", async () => {
+      const result = await exec("wc repo/large-file.txt");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("100");
+    });
+
+    it("grep finds specific line in large file", async () => {
+      const result = await exec("grep 'line 50:' repo/large-file.txt");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("line 50:");
+    });
+  });
 });

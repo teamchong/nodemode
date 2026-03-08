@@ -119,7 +119,7 @@ export class ProcessManager {
       if (!trimmed) continue;
 
       // Check operator condition
-      if (operator === "&&" && lastResult.exitCode !== 0) break;
+      if (operator === "&&" && lastResult.exitCode !== 0) continue;
       if (operator === "||" && lastResult.exitCode === 0) continue;
 
       lastResult = await this.execSingle(trimmed, options);

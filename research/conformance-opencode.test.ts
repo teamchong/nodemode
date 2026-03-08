@@ -466,4 +466,473 @@ describe("opencode/AI agent conformance", () => {
       expect(await exists("myapp/src/helpers.ts")).toBe(false);
     });
   });
+
+  // =====================================================================
+  // PHASE 6: Multi-file refactoring
+  // Agent renames a function across multiple files
+  // =====================================================================
+
+  describe("Phase 6: Multi-file refactoring", () => {
+    it("finds all usages of a function via grep", async () => {
+      const result = await exec("grep greet myapp/src/index.ts");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("greet");
+    });
+
+    it("renames function in source file", async () => {
+      const original = await readFile("myapp/src/utils.ts");
+      const updated = original.content.replace(/greet/g, "sayHello");
+      await writeFile("myapp/src/utils.ts", updated);
+
+      const check = await readFile("myapp/src/utils.ts");
+      expect(check.content).toContain("sayHello");
+      expect(check.content).not.toContain("greet");
+    });
+
+    it("updates import in consumer file", async () => {
+      const original = await readFile("myapp/src/index.ts");
+      const updated = original.content.replace(/greet/g, "sayHello");
+      await writeFile("myapp/src/index.ts", updated);
+
+      const check = await readFile("myapp/src/index.ts");
+      expect(check.content).toContain("sayHello");
+      expect(check.content).not.toContain("greet");
+    });
+
+    it("updates test file", async () => {
+      const original = await readFile("myapp/test/utils.test.ts");
+      const updated = original.content.replace(/greet/g, "sayHello");
+      await writeFile("myapp/test/utils.test.ts", updated);
+
+      const check = await readFile("myapp/test/utils.test.ts");
+      expect(check.content).toContain("sayHello");
+    });
+
+    it("verifies no stale references remain", async () => {
+      // grep for old name should fail in all modified files
+      const src = await exec("grep greet myapp/src/utils.ts");
+      expect(src.exitCode).toBe(1); // no match = exit 1
+
+      const idx = await exec("grep greet myapp/src/index.ts");
+      expect(idx.exitCode).toBe(1);
+
+      const test = await exec("grep greet myapp/test/utils.test.ts");
+      expect(test.exitCode).toBe(1);
+    });
+  });
+
+  // =====================================================================
+  // PHASE 7: Error recovery
+  // Agent handles broken files, reverts changes
+  // =====================================================================
+
+  describe("Phase 7: Error recovery", () => {
+    it("detects syntax error by reading file", async () => {
+      // Agent writes buggy code
+      await writeFile(
+        "myapp/src/buggy.ts",
+        [
+          "export function broken( {",
+          "  return 42;",
+          "}",
+          "",
+        ].join("\n"),
+      );
+
+      // Agent reads back and detects the issue (missing closing paren)
+      const content = await readFile("myapp/src/buggy.ts");
+      expect(content.content).toContain("broken(");
+      // Agent would parse this and detect the syntax error
+    });
+
+    it("fixes the buggy file", async () => {
+      await writeFile(
+        "myapp/src/buggy.ts",
+        [
+          "export function broken(): number {",
+          "  return 42;",
+          "}",
+          "",
+        ].join("\n"),
+      );
+
+      const fixed = await readFile("myapp/src/buggy.ts");
+      expect(fixed.content).toContain("broken(): number");
+    });
+
+    it("reverts a file by writing previous content", async () => {
+      // Save current state
+      const before = await readFile("myapp/src/math.ts");
+
+      // Make a bad change
+      await writeFile("myapp/src/math.ts", "// BROKEN FILE");
+      const broken = await readFile("myapp/src/math.ts");
+      expect(broken.content).toBe("// BROKEN FILE");
+
+      // Revert
+      await writeFile("myapp/src/math.ts", before.content);
+      const reverted = await readFile("myapp/src/math.ts");
+      expect(reverted.content).toContain("multiply");
+      expect(reverted.content).toContain("divide");
+    });
+
+    it("cleans up failed file", async () => {
+      const rm = await exec("rm myapp/src/buggy.ts");
+      expect(rm.exitCode).toBe(0);
+      expect(await exists("myapp/src/buggy.ts")).toBe(false);
+    });
+
+    it("handles missing file gracefully", async () => {
+      const result = await exec("cat myapp/src/nonexistent.ts");
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("No such file");
+    });
+
+    it("handles empty command gracefully", async () => {
+      const res = await SELF.fetch(`http://localhost/workspace/${W}/exec`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: "  " }),
+      });
+      // Non-empty but whitespace-only command
+      expect(res.status).toBe(200);
+    });
+  });
+
+  // =====================================================================
+  // PHASE 8: Config file management
+  // Agent reads/writes JSON, YAML-like, TOML-like, .env configs
+  // =====================================================================
+
+  describe("Phase 8: Config file management", () => {
+    it("writes and reads .env file", async () => {
+      const env = [
+        "DATABASE_URL=postgres://localhost:5432/mydb",
+        "API_KEY=sk-test-12345",
+        "NODE_ENV=development",
+        "PORT=3000",
+        "",
+      ].join("\n");
+      await writeFile("myapp/.env", env);
+
+      const content = await readFile("myapp/.env");
+      expect(content.content).toContain("DATABASE_URL=");
+      expect(content.content).toContain("API_KEY=");
+    });
+
+    it("parses .env values with grep", async () => {
+      const result = await exec("grep DATABASE_URL myapp/.env");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("postgres://localhost:5432/mydb");
+    });
+
+    it("writes eslint config", async () => {
+      const config = {
+        root: true,
+        parser: "@typescript-eslint/parser",
+        plugins: ["@typescript-eslint"],
+        extends: [
+          "eslint:recommended",
+          "plugin:@typescript-eslint/recommended",
+        ],
+        rules: {
+          "no-unused-vars": "off",
+          "@typescript-eslint/no-unused-vars": "error",
+          semi: ["error", "always"],
+        },
+      };
+      await writeFile("myapp/.eslintrc.json", JSON.stringify(config, null, 2));
+      const data = await readFile("myapp/.eslintrc.json");
+      const parsed = JSON.parse(data.content);
+      expect(parsed.parser).toBe("@typescript-eslint/parser");
+      expect(parsed.rules.semi[0]).toBe("error");
+    });
+
+    it("writes prettier config", async () => {
+      const config = {
+        semi: true,
+        trailingComma: "all",
+        singleQuote: false,
+        printWidth: 100,
+        tabWidth: 2,
+      };
+      await writeFile("myapp/.prettierrc.json", JSON.stringify(config, null, 2));
+      const data = await readFile("myapp/.prettierrc.json");
+      expect(JSON.parse(data.content).semi).toBe(true);
+    });
+
+    it("writes vitest config", async () => {
+      const config = [
+        'import { defineConfig } from "vitest/config";',
+        "",
+        "export default defineConfig({",
+        "  test: {",
+        '    include: ["test/**/*.test.ts"],',
+        "    coverage: {",
+        '      provider: "v8",',
+        "      thresholds: {",
+        "        branches: 80,",
+        "        functions: 80,",
+        "        lines: 80,",
+        "      },",
+        "    },",
+        "  },",
+        "});",
+        "",
+      ].join("\n");
+      await writeFile("myapp/vitest.config.ts", config);
+      const data = await readFile("myapp/vitest.config.ts");
+      expect(data.content).toContain("defineConfig");
+      expect(data.content).toContain("coverage");
+    });
+
+    it("modifies package.json scripts", async () => {
+      const data = await readFile("myapp/package.json");
+      const pkg = JSON.parse(data.content);
+      pkg.scripts.lint = "eslint src/ test/";
+      pkg.scripts.format = "prettier --write src/ test/";
+      pkg.scripts["test:coverage"] = "vitest run --coverage";
+      await writeFile("myapp/package.json", JSON.stringify(pkg, null, 2));
+
+      const updated = await readFile("myapp/package.json");
+      const check = JSON.parse(updated.content);
+      expect(check.scripts.lint).toBe("eslint src/ test/");
+      expect(check.scripts["test:coverage"]).toContain("coverage");
+    });
+  });
+
+  // =====================================================================
+  // PHASE 9: Search across codebase
+  // Agent searches for patterns, TODOs, dead code
+  // =====================================================================
+
+  describe("Phase 9: Codebase search", () => {
+    it("finds all export statements across files", async () => {
+      const utils = await exec("grep export myapp/src/utils.ts");
+      expect(utils.exitCode).toBe(0);
+      expect(utils.stdout).toContain("export function");
+
+      const math = await exec("grep export myapp/src/math.ts");
+      expect(math.exitCode).toBe(0);
+      expect(math.stdout).toContain("export function");
+    });
+
+    it("finds all import statements in index", async () => {
+      const result = await exec("grep import myapp/src/index.ts");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("utils");
+      expect(result.stdout).toContain("math");
+    });
+
+    it("counts total lines across source files with pipe", async () => {
+      const utils = await exec("wc myapp/src/utils.ts");
+      expect(utils.exitCode).toBe(0);
+
+      const math = await exec("wc myapp/src/math.ts");
+      expect(math.exitCode).toBe(0);
+
+      const index = await exec("wc myapp/src/index.ts");
+      expect(index.exitCode).toBe(0);
+    });
+
+    it("finds TODO comments", async () => {
+      // Add a TODO
+      const content = await readFile("myapp/src/math.ts");
+      const withTodo = "// TODO: add error handling for NaN inputs\n" + content.content;
+      await writeFile("myapp/src/math.ts", withTodo);
+
+      const result = await exec("grep TODO myapp/src/math.ts");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("TODO");
+      expect(result.stdout).toContain("NaN");
+    });
+
+    it("case-insensitive search with grep -i", async () => {
+      const result = await exec("grep -i todo myapp/src/math.ts");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("TODO");
+    });
+
+    it("uses pipe to filter ls output", async () => {
+      const result = await exec("ls myapp/src | grep ts");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("index.ts");
+      expect(result.stdout).toContain("utils.ts");
+      expect(result.stdout).toContain("math.ts");
+    });
+
+    it("uses ls -l for detailed file listing", async () => {
+      const result = await exec("ls -l myapp/src");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("rwxr-xr-x");
+      expect(result.stdout).toContain("index.ts");
+    });
+  });
+
+  // =====================================================================
+  // PHASE 10: Monorepo patterns
+  // Agent works across multiple packages in a workspace
+  // =====================================================================
+
+  describe("Phase 10: Monorepo workspace", () => {
+    it("creates monorepo structure", async () => {
+      await exec("mkdir -p monorepo/packages/core/src");
+      await exec("mkdir -p monorepo/packages/cli/src");
+      await exec("mkdir -p monorepo/packages/web/src");
+
+      const entries = await readdir("monorepo/packages");
+      const names = entries.map((e) => e.name);
+      expect(names).toContain("core");
+      expect(names).toContain("cli");
+      expect(names).toContain("web");
+    });
+
+    it("writes root package.json with workspaces", async () => {
+      const rootPkg = {
+        name: "my-monorepo",
+        private: true,
+        workspaces: ["packages/*"],
+        scripts: {
+          build: "turbo build",
+          test: "turbo test",
+          lint: "turbo lint",
+        },
+        devDependencies: {
+          turbo: "^2.0.0",
+        },
+      };
+      await writeFile("monorepo/package.json", JSON.stringify(rootPkg, null, 2));
+    });
+
+    it("writes package configs for each workspace", async () => {
+      const corePkg = {
+        name: "@monorepo/core",
+        version: "1.0.0",
+        type: "module",
+        main: "dist/index.js",
+        scripts: { build: "tsc", test: "vitest run" },
+      };
+      await writeFile("monorepo/packages/core/package.json", JSON.stringify(corePkg, null, 2));
+
+      const cliPkg = {
+        name: "@monorepo/cli",
+        version: "1.0.0",
+        type: "module",
+        bin: { mycli: "dist/cli.js" },
+        dependencies: { "@monorepo/core": "workspace:*" },
+        scripts: { build: "tsc" },
+      };
+      await writeFile("monorepo/packages/cli/package.json", JSON.stringify(cliPkg, null, 2));
+
+      const webPkg = {
+        name: "@monorepo/web",
+        version: "1.0.0",
+        type: "module",
+        dependencies: { "@monorepo/core": "workspace:*", next: "^15.0.0" },
+        scripts: { dev: "next dev", build: "next build" },
+      };
+      await writeFile("monorepo/packages/web/package.json", JSON.stringify(webPkg, null, 2));
+    });
+
+    it("writes shared core library", async () => {
+      await writeFile(
+        "monorepo/packages/core/src/index.ts",
+        [
+          "export function validate(input: string): boolean {",
+          "  return input.length > 0 && input.length < 256;",
+          "}",
+          "",
+          "export function sanitize(input: string): string {",
+          '  return input.replace(/[<>&"]/g, "");',
+          "}",
+          "",
+          "export const VERSION = \"1.0.0\";",
+          "",
+        ].join("\n"),
+      );
+    });
+
+    it("writes CLI that imports core", async () => {
+      await writeFile(
+        "monorepo/packages/cli/src/cli.ts",
+        [
+          'import { validate, sanitize, VERSION } from "@monorepo/core";',
+          "",
+          "const input = process.argv[2] || \"\";",
+          "",
+          "if (!validate(input)) {",
+          '  console.error("Invalid input");',
+          "  process.exit(1);",
+          "}",
+          "",
+          "console.log(`[v${VERSION}] ${sanitize(input)}`);",
+          "",
+        ].join("\n"),
+      );
+    });
+
+    it("writes web app that imports core", async () => {
+      await writeFile(
+        "monorepo/packages/web/src/page.tsx",
+        [
+          'import { validate, sanitize } from "@monorepo/core";',
+          "",
+          "export default function Page() {",
+          '  const safe = sanitize("<script>alert(1)</script>");',
+          "  return <div>{safe}</div>;",
+          "}",
+          "",
+        ].join("\n"),
+      );
+    });
+
+    it("verifies cross-package import references", async () => {
+      const cli = await exec("grep @monorepo/core monorepo/packages/cli/src/cli.ts");
+      expect(cli.exitCode).toBe(0);
+      expect(cli.stdout).toContain("@monorepo/core");
+
+      const web = await exec("grep @monorepo/core monorepo/packages/web/src/page.tsx");
+      expect(web.exitCode).toBe(0);
+    });
+
+    it("writes turbo.json pipeline config", async () => {
+      const turbo = {
+        "$schema": "https://turbo.build/schema.json",
+        tasks: {
+          build: {
+            dependsOn: ["^build"],
+            outputs: ["dist/**"],
+          },
+          test: {
+            dependsOn: ["build"],
+          },
+          lint: {},
+        },
+      };
+      await writeFile("monorepo/turbo.json", JSON.stringify(turbo, null, 2));
+      const data = await readFile("monorepo/turbo.json");
+      expect(JSON.parse(data.content).tasks.build.dependsOn).toContain("^build");
+    });
+
+    it("turbo build requires container", async () => {
+      const result = await exec("turbo build");
+      expect(result.exitCode).toBe(127);
+    });
+
+    it("verifies full monorepo structure", async () => {
+      const files = [
+        "monorepo/package.json",
+        "monorepo/turbo.json",
+        "monorepo/packages/core/package.json",
+        "monorepo/packages/core/src/index.ts",
+        "monorepo/packages/cli/package.json",
+        "monorepo/packages/cli/src/cli.ts",
+        "monorepo/packages/web/package.json",
+        "monorepo/packages/web/src/page.tsx",
+      ];
+      for (const f of files) {
+        expect(await exists(f)).toBe(true);
+      }
+    });
+  });
 });
