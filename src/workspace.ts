@@ -21,7 +21,7 @@ import type { Env } from "./env";
 import { FsEngine } from "./fs-engine";
 import { ProcessManager } from "./process-manager";
 import type { ContainerStatus, ContainerExecResult } from "./container";
-import { validatePath, validateCommand, ValidationError } from "./validate";
+import { validatePath, ValidationError } from "./validate";
 import { setContext } from "./shims/context";
 
 const MAX_TERMINAL_BUFFER_ROWS = 5000;
@@ -198,7 +198,6 @@ export class Workspace extends DurableObject<Env> {
       env?: Record<string, string>;
     };
 
-    validateCommand(body.command);
     if (body.cwd) validatePath(body.cwd);
 
     const result = await this.processes.exec(body.command, {
@@ -588,17 +587,14 @@ export class Workspace extends DurableObject<Env> {
     }
 
     if (msg.type === "exec" && msg.command) {
+      let result;
       try {
-        validateCommand(msg.command);
+        result = await this.processes.exec(msg.command, { cwd: msg.cwd });
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
         ws.send(JSON.stringify({ type: "error", error: errMsg }));
         return;
       }
-
-      const result = await this.processes.exec(msg.command, {
-        cwd: msg.cwd,
-      });
 
       // Buffer output for hibernation persistence
       if (result.stdout) {

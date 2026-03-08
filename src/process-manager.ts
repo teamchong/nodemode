@@ -66,7 +66,7 @@ const BUILTIN_COMMANDS = new Set([
   "sleep",
 ]);
 
-export type ContainerExecFn = (
+type ContainerExecFn = (
   command: string,
   options: { cwd?: string; env?: Record<string, string> },
 ) => Promise<SpawnResult>;
@@ -455,19 +455,17 @@ export class ProcessManager {
       return fail("grep: usage: grep PATTERN [FILE]\n");
     }
 
-    let regex: RegExp;
+    let test: (line: string) => boolean;
     try {
-      regex = new RegExp(pattern, caseInsensitive ? "i" : "");
+      const regex = new RegExp(pattern, caseInsensitive ? "i" : "");
+      test = (line) => regex.test(line);
     } catch {
       // Fall back to literal string match if regex is invalid
-      const test = caseInsensitive
-        ? (line: string) => line.toLowerCase().includes(pattern.toLowerCase())
-        : (line: string) => line.includes(pattern);
-      const matches = content.split("\n").filter(test);
-      if (matches.length === 0) return { exitCode: 1, stdout: "", stderr: "" };
-      return ok(matches.join("\n") + "\n");
+      test = caseInsensitive
+        ? (line) => line.toLowerCase().includes(pattern.toLowerCase())
+        : (line) => line.includes(pattern);
     }
-    const matches = content.split("\n").filter((line) => regex.test(line));
+    const matches = content.split("\n").filter(test);
     if (matches.length === 0) return { exitCode: 1, stdout: "", stderr: "" };
     return ok(matches.join("\n") + "\n");
   }
@@ -536,36 +534,32 @@ export class ProcessManager {
   }
 
   private builtinTest(args: string[], cwd: string): SpawnResult {
-    if (args.length === 0) return { exitCode: 1, stdout: "", stderr: "" };
-    // test -f file / test -d dir / test -e path
-    if (args[0] === "-f" && args[1]) {
-      const stat = this.fs.stat(resolvePath(cwd, args[1]));
-      return stat && !stat.isDirectory
-        ? ok("")
-        : { exitCode: 1, stdout: "", stderr: "" };
+    const testFail: SpawnResult = { exitCode: 1, stdout: "", stderr: "" };
+    if (args.length === 0) return testFail;
+
+    let pass = false;
+    switch (args[0]) {
+      case "-f": {
+        const stat = args[1] ? this.fs.stat(resolvePath(cwd, args[1])) : null;
+        pass = !!stat && !stat.isDirectory;
+        break;
+      }
+      case "-d": {
+        const stat = args[1] ? this.fs.stat(resolvePath(cwd, args[1])) : null;
+        pass = !!stat?.isDirectory;
+        break;
+      }
+      case "-e":
+        pass = !!args[1] && this.fs.exists(resolvePath(cwd, args[1]));
+        break;
+      case "-z":
+        pass = !args[1];
+        break;
+      case "-n":
+        pass = !!args[1];
+        break;
     }
-    if (args[0] === "-d" && args[1]) {
-      const stat = this.fs.stat(resolvePath(cwd, args[1]));
-      return stat?.isDirectory
-        ? ok("")
-        : { exitCode: 1, stdout: "", stderr: "" };
-    }
-    if (args[0] === "-e" && args[1]) {
-      return this.fs.exists(resolvePath(cwd, args[1]))
-        ? ok("")
-        : { exitCode: 1, stdout: "", stderr: "" };
-    }
-    if (args[0] === "-z") {
-      return !args[1] || args[1] === ""
-        ? ok("")
-        : { exitCode: 1, stdout: "", stderr: "" };
-    }
-    if (args[0] === "-n") {
-      return args[1] && args[1] !== ""
-        ? ok("")
-        : { exitCode: 1, stdout: "", stderr: "" };
-    }
-    return { exitCode: 1, stdout: "", stderr: "" };
+    return pass ? ok("") : testFail;
   }
 }
 
