@@ -118,23 +118,23 @@ export class Workspace extends DurableObject<Env> {
     try {
       switch (action) {
         case "/init":
-          return this.handleInit(request);
+          return await this.handleInit(request);
         case "/exec":
-          return this.handleExec(request);
+          return await this.handleExec(request);
         case "/fs/read":
-          return this.handleFsRead(request);
+          return await this.handleFsRead(request);
         case "/fs/write":
-          return this.handleFsWrite(request);
+          return await this.handleFsWrite(request);
         case "/fs/stat":
           return this.handleFsStat(request);
         case "/fs/readdir":
           return this.handleFsReaddir(request);
         case "/fs/mkdir":
-          return this.handleFsMkdir(request);
+          return await this.handleFsMkdir(request);
         case "/fs/unlink":
-          return this.handleFsUnlink(request);
+          return await this.handleFsUnlink(request);
         case "/fs/rename":
-          return this.handleFsRename(request);
+          return await this.handleFsRename(request);
         case "/fs/exists":
           return this.handleFsExists(request);
         case "/process/list":
@@ -144,9 +144,9 @@ export class Workspace extends DurableObject<Env> {
         case "/container/status":
           return json({ status: this.containerStatus });
         case "/container/stop":
-          return this.handleContainerStop();
+          return await this.handleContainerStop();
         case "/index-invalidate":
-          return this.handleIndexInvalidate(request);
+          return await this.handleIndexInvalidate(request);
         default:
           return json({ error: "Not found" }, 404);
       }
