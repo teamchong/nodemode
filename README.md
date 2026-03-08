@@ -61,7 +61,7 @@ Requires Cloudflare Workers Paid plan (for Durable Objects + R2).
 |------|--------|----------------|
 | Filesystem | ~80% | No streaming (large files OOM), no symlinks, no file descriptors, appendFile is O(n), rename doesn't handle directories, R2+SQLite writes not atomic |
 | Container exec | ~70% | Dockerfile + agent.mjs + snapshot/restore working. Missing: streaming output, stdin piping, long-running background processes |
-| Shell parsing | ~10% | No pipes, no `&&`/`||`/`;`, no redirects (`>`, `>>`, `<`), no variable expansion, no background jobs |
+| Shell parsing | ~40% | Pipes (`\|`), chains (`&&`, `\|\|`, `;`) work. Missing: redirects (`>`, `>>`, `<`), variable expansion, background jobs, subshells |
 | Auth / security | 0% | No authentication, CORS is `*`, no rate limiting, no path traversal validation |
 | Process model | ~20% | Request/response only, no long-running processes, no signals, no stdin streaming, unbounded process table |
 | Terminal buffer | ~50% | Works but grows unbounded, no rotation/max size |
