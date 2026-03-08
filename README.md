@@ -62,7 +62,7 @@ Shell features: pipes (`|`), chains (`&&`, `||`, `;`), quoted strings.
 
 ## Conformance tests
 
-261 tests verify the approach against patterns from popular tools (all run on builtins, no Container):
+262 tests verify the approach against patterns from popular tools (all run on builtins, no Container):
 
 | Tool | What it needs | Tests |
 |------|--------------|-------|
