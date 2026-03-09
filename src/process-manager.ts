@@ -363,7 +363,8 @@ export class ProcessManager {
     const dir = paths[0] ? resolvePath(cwd, paths[0]) : cwd;
 
     const entries = this.fs.readdir(dir);
-    if (entries.length === 0 && !this.fs.exists(dir)) {
+    const normalized = dir.replace(/^\/+/, "").replace(/\/+$/, "");
+    if (entries.length === 0 && normalized && !this.fs.exists(dir)) {
       return fail(`ls: cannot access '${dir}': No such file or directory\n`);
     }
 
