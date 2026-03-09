@@ -460,6 +460,12 @@ export class FsEngine {
 }
 
 function normalizePath(path: string): string {
-  // Collapse multiple slashes, strip leading/trailing
-  return path.replace(/\/+/g, "/").replace(/^\/|\/$/g, "");
+  const parts = path.split("/");
+  const resolved: string[] = [];
+  for (const part of parts) {
+    if (part === "." || part === "") continue;
+    if (part === "..") { resolved.pop(); }
+    else { resolved.push(part); }
+  }
+  return resolved.join("/");
 }
