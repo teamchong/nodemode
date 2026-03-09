@@ -255,10 +255,8 @@ export class ProcessManager {
       case "whoami":
         return ok((options.env?.["USER"] || "nodemode") + "\n");
 
-      case "env": {
-        const entries = Object.entries(options.env || {});
-        return ok(entries.length > 0 ? entries.map(([k, v]) => `${k}=${v}`).join("\n") + "\n" : "");
-      }
+      case "env":
+        return ok(Object.entries(options.env || {}).map(([k, v]) => `${k}=${v}\n`).join(""));
 
       case "cat":
         return this.builtinCat(args, cwd, options);
@@ -295,7 +293,7 @@ export class ProcessManager {
       case "which":
         return BUILTIN_COMMANDS.has(args[0])
           ? ok(`/usr/bin/${args[0]}\n`)
-          : { exitCode: 1, stdout: "", stderr: `which: ${args[0]}: not found\n` };
+          : fail(`which: ${args[0]}: not found\n`);
       case "printf":
         return this.builtinPrintf(args);
       case "test":
@@ -485,7 +483,8 @@ export class ProcessManager {
   }
 
   private builtinMkdir(args: string[], cwd: string): SpawnResult {
-    const recursive = args.includes("-p");
+    const flags = args.filter((a) => a.startsWith("-")).join("");
+    const recursive = flags.includes("p");
     const dirs = args.filter((a) => !a.startsWith("-"));
     for (const dir of dirs) {
       this.fs.mkdir(resolvePath(cwd, dir), recursive);
@@ -589,30 +588,36 @@ export class ProcessManager {
     const testFail: SpawnResult = { exitCode: 1, stdout: "", stderr: "" };
     if (args.length === 0) return testFail;
 
+    // Handle ! negation
+    const negate = args[0] === "!";
+    const a = negate ? args.slice(1) : args;
+    if (a.length === 0) return negate ? ok("") : testFail;
+
     let pass = false;
 
     // Binary operators: test A = B, test A != B
-    if (args.length >= 3 && (args[1] === "=" || args[1] === "!=")) {
-      pass = args[1] === "=" ? args[0] === args[2] : args[0] !== args[2];
+    if (a.length >= 3 && (a[1] === "=" || a[1] === "!=")) {
+      pass = a[1] === "=" ? a[0] === a[2] : a[0] !== a[2];
     } else {
-      switch (args[0]) {
+      switch (a[0]) {
         case "-f":
         case "-d": {
-          const stat = args[1] ? this.fs.stat(resolvePath(cwd, args[1])) : null;
-          pass = args[0] === "-f" ? !!stat && !stat.isDirectory : !!stat?.isDirectory;
+          const stat = a[1] ? this.fs.stat(resolvePath(cwd, a[1])) : null;
+          pass = a[0] === "-f" ? !!stat && !stat.isDirectory : !!stat?.isDirectory;
           break;
         }
         case "-e":
-          pass = !!args[1] && this.fs.exists(resolvePath(cwd, args[1]));
+          pass = !!a[1] && this.fs.exists(resolvePath(cwd, a[1]));
           break;
         case "-z":
-          pass = !args[1];
+          pass = !a[1];
           break;
         case "-n":
-          pass = !!args[1];
+          pass = !!a[1];
           break;
       }
     }
+    if (negate) pass = !pass;
     return pass ? ok("") : testFail;
   }
 }
