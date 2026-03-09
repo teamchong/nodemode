@@ -424,29 +424,13 @@ export class Workspace extends DurableObject<Env> {
     for (const path of body.paths) {
       try {
         validatePath(path);
-        // Refresh index entry from R2
         const r2Key = `${this.workspaceId}/${path}`;
         const head = await this.env.FS_BUCKET.head(r2Key);
         if (head) {
-          // Update or insert index entry
-          const existing = this.sql.exec("SELECT mode FROM files WHERE path = ?", path).toArray();
-          const mode = existing.length > 0 ? (existing[0].mode as number) : 0o644;
-          this.sql.exec(
-            `INSERT OR REPLACE INTO files (path, r2_key, size, mode, mtime, is_dir)
-             VALUES (?, ?, ?, ?, ?, 0)`,
-            path,
-            r2Key,
-            head.size,
-            mode,
-            Date.now(),
-          );
-          // Invalidate file cache
-          this.sql.exec("DELETE FROM file_cache WHERE path = ?", path);
+          this.upsertFileIndex(path, r2Key, head.size);
           refreshed++;
         } else {
-          // File deleted from R2 — remove from index
-          this.sql.exec("DELETE FROM files WHERE path = ?", path);
-          this.sql.exec("DELETE FROM file_cache WHERE path = ?", path);
+          this.removeFileIndex(path);
         }
       } catch {
         // Skip invalid paths
@@ -512,23 +496,7 @@ export class Workspace extends DurableObject<Env> {
         const path = obj.key.slice(prefix.length);
         if (!path) continue;
         r2Paths.add(path);
-
-        // Upsert index entry (size may match but content could differ)
-        const rows = this.sql
-          .exec("SELECT mode FROM files WHERE path = ?", path)
-          .toArray();
-        const mode = rows.length > 0 ? (rows[0].mode as number) : 0o644;
-        this.sql.exec(
-          `INSERT OR REPLACE INTO files (path, r2_key, size, mode, mtime, is_dir)
-           VALUES (?, ?, ?, ?, ?, 0)`,
-          path,
-          obj.key,
-          obj.size,
-          mode,
-          Date.now(),
-        );
-        // Always invalidate cache — content may have changed
-        this.sql.exec("DELETE FROM file_cache WHERE path = ?", path);
+        this.upsertFileIndex(path, obj.key, obj.size);
       }
 
       cursor = listed.truncated ? listed.cursor : undefined;
@@ -541,8 +509,7 @@ export class Workspace extends DurableObject<Env> {
     for (const row of indexed) {
       const path = row.path as string;
       if (!r2Paths.has(path)) {
-        this.sql.exec("DELETE FROM files WHERE path = ?", path);
-        this.sql.exec("DELETE FROM file_cache WHERE path = ?", path);
+        this.removeFileIndex(path);
       }
     }
   }
@@ -628,6 +595,22 @@ export class Workspace extends DurableObject<Env> {
   }
 
   // -- Internal helpers --
+
+  private upsertFileIndex(path: string, r2Key: string, size: number): void {
+    const rows = this.sql.exec("SELECT mode FROM files WHERE path = ?", path).toArray();
+    const mode = rows.length > 0 ? (rows[0].mode as number) : 0o644;
+    this.sql.exec(
+      `INSERT OR REPLACE INTO files (path, r2_key, size, mode, mtime, is_dir)
+       VALUES (?, ?, ?, ?, ?, 0)`,
+      path, r2Key, size, mode, Date.now(),
+    );
+    this.sql.exec("DELETE FROM file_cache WHERE path = ?", path);
+  }
+
+  private removeFileIndex(path: string): void {
+    this.sql.exec("DELETE FROM files WHERE path = ?", path);
+    this.sql.exec("DELETE FROM file_cache WHERE path = ?", path);
+  }
 
   private trimTerminalBuffer(): void {
     const count = this.sql

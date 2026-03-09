@@ -301,12 +301,17 @@ export class ProcessManager {
         return this.builtinCp(args, cwd);
       case "mv":
         return this.builtinMv(args, cwd);
-      case "basename":
-        return ok((args[0]?.split("/").pop() || "") + "\n");
-      case "dirname":
-        return ok(
-          (args[0]?.split("/").slice(0, -1).join("/") || ".") + "\n",
-        );
+      case "basename": {
+        // Strip trailing slashes, then extract last component
+        const cleaned = (args[0] || "").replace(/\/+$/, "");
+        return ok((cleaned.split("/").pop() || "/") + "\n");
+      }
+      case "dirname": {
+        const cleaned = (args[0] || "").replace(/\/+$/, "");
+        const parent = cleaned.split("/").slice(0, -1).join("/");
+        // dirname / → /, dirname foo → ., dirname /foo → /
+        return ok((parent || (args[0]?.startsWith("/") ? "/" : ".")) + "\n");
+      }
       case "which":
         return BUILTIN_COMMANDS.has(args[0])
           ? ok(`/usr/bin/${args[0]}\n`)
@@ -661,11 +666,8 @@ function parseCommand(command: string): { cmd: string; args: string[] } {
 }
 
 function resolvePath(cwd: string, path: string): string {
-  if (path.startsWith("/")) return path.replace(/^\/+/, "").replace(/\/+$/, "");
-  const base = cwd.replace(/^\/+/, "").replace(/\/+$/, "");
-  const combined = base ? `${base}/${path}` : path;
-  // Resolve . and ..
-  const parts = combined.split("/");
+  const raw = path.startsWith("/") ? path : (cwd.replace(/^\/+/, "").replace(/\/+$/, "") + "/" + path);
+  const parts = raw.split("/");
   const resolved: string[] = [];
   for (const part of parts) {
     if (part === "." || part === "") continue;
