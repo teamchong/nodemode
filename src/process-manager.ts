@@ -303,7 +303,7 @@ export class ProcessManager {
           ? ok(`/usr/bin/${args[0]}\n`)
           : { exitCode: 1, stdout: "", stderr: `which: ${args[0]}: not found\n` };
       case "printf":
-        return ok(args.join(" "));
+        return this.builtinPrintf(args);
       case "test":
         return this.builtinTest(args, cwd);
       case "sleep":
@@ -348,6 +348,17 @@ export class ProcessManager {
     const paths = args.filter((a) => !a.startsWith("-"));
     const dir = paths[0] ? resolvePath(cwd, paths[0]) : cwd;
 
+    // If target is a file (not a directory), list just that file
+    const targetStat = paths[0] ? this.fs.stat(dir) : null;
+    if (targetStat && !targetStat.isDirectory) {
+      const name = paths[0];
+      if (longFormat) {
+        const mtime = new Date(targetStat.mtime).toISOString().slice(0, 16);
+        return ok(`-rwxr-xr-x  1 nodemode nodemode  ${String(targetStat.size).padStart(8)} ${mtime} ${name}\n`);
+      }
+      return ok(name + "\n");
+    }
+
     const entries = this.fs.readdir(dir);
     const normalized = dir.replace(/^\/+/, "").replace(/\/+$/, "");
     if (entries.length === 0 && normalized && !this.fs.exists(dir)) {
@@ -376,6 +387,9 @@ export class ProcessManager {
     for (let i = 0; i < args.length; i++) {
       if (args[i] === "-n" && args[i + 1]) {
         lines = parseInt(args[++i], 10);
+      } else if (/^-\d+$/.test(args[i])) {
+        // Short form: head -5 file.txt
+        lines = parseInt(args[i].slice(1), 10);
       } else if (!args[i].startsWith("-")) {
         files.push(args[i]);
       }
@@ -546,6 +560,32 @@ export class ProcessManager {
     }
     await this.fs.rename(src, dst);
     return ok("");
+  }
+
+  private builtinPrintf(args: string[]): SpawnResult {
+    if (args.length === 0) return ok("");
+    const fmt = args[0];
+    const fmtArgs = args.slice(1);
+    let argIdx = 0;
+    let output = "";
+    for (let i = 0; i < fmt.length; i++) {
+      if (fmt[i] === "%" && i + 1 < fmt.length) {
+        const spec = fmt[++i];
+        if (spec === "s") { output += fmtArgs[argIdx++] ?? ""; }
+        else if (spec === "d") { output += parseInt(fmtArgs[argIdx++] ?? "0", 10); }
+        else if (spec === "%") { output += "%"; }
+        else { output += "%" + spec; } // unknown specifier, pass through
+      } else if (fmt[i] === "\\" && i + 1 < fmt.length) {
+        const esc = fmt[++i];
+        if (esc === "n") output += "\n";
+        else if (esc === "t") output += "\t";
+        else if (esc === "\\") output += "\\";
+        else output += "\\" + esc;
+      } else {
+        output += fmt[i];
+      }
+    }
+    return ok(output);
   }
 
   private builtinTest(args: string[], cwd: string): SpawnResult {

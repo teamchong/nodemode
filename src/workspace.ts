@@ -78,7 +78,6 @@ export class Workspace extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS processes (
         pid INTEGER PRIMARY KEY AUTOINCREMENT,
         command TEXT NOT NULL,
-        args TEXT NOT NULL DEFAULT '[]',
         status TEXT NOT NULL DEFAULT 'running',
         exit_code INTEGER,
         stdout TEXT,
