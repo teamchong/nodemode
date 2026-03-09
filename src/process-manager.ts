@@ -139,12 +139,10 @@ export class ProcessManager {
     const effectiveCwd = options.cwd || this.cwd;
 
     // Record in process table
-    const now = Date.now();
     this.sql.exec(
-      "INSERT INTO processes (command, args, status, created_at) VALUES (?, ?, 'running', ?)",
+      "INSERT INTO processes (command, status, created_at) VALUES (?, 'running', ?)",
       command,
-      JSON.stringify(args),
-      now,
+      Date.now(),
     );
     const pid = this.sql
       .exec("SELECT last_insert_rowid() as pid")
