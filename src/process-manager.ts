@@ -162,9 +162,8 @@ export class ProcessManager {
       .exec("SELECT last_insert_rowid() as pid")
       .toArray()[0].pid as number;
 
+    let result: SpawnResult;
     try {
-      let result: SpawnResult;
-
       if (BUILTIN_COMMANDS.has(cmd)) {
         result = await this.execBuiltin(cmd, args, effectiveCwd, options);
       } else if (this.containerExec) {
@@ -189,9 +188,6 @@ export class ProcessManager {
         Date.now(),
         pid,
       );
-
-      if (++this.execCount % PRUNE_INTERVAL === 0) this.pruneProcessTable();
-      return result;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.sql.exec(
@@ -200,9 +196,11 @@ export class ProcessManager {
         Date.now(),
         pid,
       );
+      result = { exitCode: 1, stdout: "", stderr: msg };
+    } finally {
       if (++this.execCount % PRUNE_INTERVAL === 0) this.pruneProcessTable();
-      return { exitCode: 1, stdout: "", stderr: msg };
     }
+    return result;
   }
 
   private pruneProcessTable(): void {
