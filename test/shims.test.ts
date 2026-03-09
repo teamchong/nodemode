@@ -12,80 +12,29 @@
 
 import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll } from "vitest";
+import { createHelpers } from "./helpers";
 
-const W = "shim-test";
+const h = createHelpers("shim-test");
 
-// Helper to call fs operations via HTTP
+// Shim tests need raw Response access for status code checks
 async function fsWrite(path: string, content: string) {
-  const res = await SELF.fetch(`http://localhost/workspace/${W}/fs/write`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, content }),
-  });
+  const res = await h.writeFile(path, content);
   expect(res.status).toBe(200);
   return res;
 }
 
 async function fsRead(path: string): Promise<string> {
-  const res = await SELF.fetch(`http://localhost/workspace/${W}/fs/read`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path }),
-  });
-  expect(res.status).toBe(200);
-  const data = (await res.json()) as { content: string };
+  const data = await h.readFile(path);
   return data.content;
 }
 
-async function fsStat(path: string) {
-  return await SELF.fetch(
-    `http://localhost/workspace/${W}/fs/stat?path=${encodeURIComponent(path)}`,
-  );
-}
-
 async function fsReaddir(path: string) {
-  const res = await SELF.fetch(
-    `http://localhost/workspace/${W}/fs/readdir?path=${encodeURIComponent(path)}`,
-  );
-  expect(res.status).toBe(200);
-  const data = (await res.json()) as { name: string; isDir: boolean }[];
-  return data.map((e) => e.name);
-}
-
-async function fsUnlink(path: string) {
-  return await SELF.fetch(`http://localhost/workspace/${W}/fs/unlink`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path }),
-  });
-}
-
-async function fsRename(oldPath: string, newPath: string) {
-  return await SELF.fetch(`http://localhost/workspace/${W}/fs/rename`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ oldPath, newPath }),
-  });
-}
-
-async function fsMkdir(path: string) {
-  return await SELF.fetch(`http://localhost/workspace/${W}/fs/mkdir`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, recursive: true }),
-  });
-}
-
-async function fsExists(path: string) {
-  const res = await SELF.fetch(
-    `http://localhost/workspace/${W}/fs/exists?path=${encodeURIComponent(path)}`,
-  );
-  const data = (await res.json()) as { exists: boolean };
-  return data.exists;
+  const entries = await h.readdir(path);
+  return entries.map((e) => e.name);
 }
 
 async function exec(command: string) {
-  return await SELF.fetch(`http://localhost/workspace/${W}/exec`, {
+  return SELF.fetch(`http://localhost/workspace/shim-test/exec`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ command }),
@@ -94,11 +43,7 @@ async function exec(command: string) {
 
 // Initialize workspace
 beforeAll(async () => {
-  await SELF.fetch(`http://localhost/workspace/${W}/init`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ owner: "test", name: "shim-test" }),
-  });
+  await h.init("test", "shim-test");
   await fsWrite("hello.txt", "hello from shim test");
 });
 
@@ -109,7 +54,7 @@ describe("fs shim (via HTTP — same backing as node:fs shim)", () => {
   });
 
   it("readFile returns 404 for missing file", async () => {
-    const res = await SELF.fetch(`http://localhost/workspace/${W}/fs/read`, {
+    const res = await SELF.fetch(`http://localhost/workspace/shim-test/fs/read`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: "nope.txt" }),
@@ -132,7 +77,7 @@ describe("fs shim (via HTTP — same backing as node:fs shim)", () => {
   });
 
   it("stat returns file metadata", async () => {
-    const res = await fsStat("hello.txt");
+    const res = await h.statRaw("hello.txt");
     expect(res.status).toBe(200);
     const data = (await res.json()) as { size: number; isDirectory: boolean; mtime: number };
     expect(data.size).toBeGreaterThan(0);
@@ -140,12 +85,12 @@ describe("fs shim (via HTTP — same backing as node:fs shim)", () => {
   });
 
   it("stat returns 404 for missing file", async () => {
-    const res = await fsStat("nope.txt");
+    const res = await h.statRaw("nope.txt");
     expect(res.status).toBe(404);
   });
 
   it("mkdir + readdir", async () => {
-    await fsMkdir("shim-dir");
+    await h.mkdir("shim-dir");
     await fsWrite("shim-dir/a.txt", "a");
     await fsWrite("shim-dir/b.txt", "b");
     const entries = await fsReaddir("shim-dir");
@@ -155,25 +100,25 @@ describe("fs shim (via HTTP — same backing as node:fs shim)", () => {
 
   it("unlink removes file", async () => {
     await fsWrite("to-delete.txt", "gone");
-    const delRes = await fsUnlink("to-delete.txt");
+    const delRes = await h.unlink("to-delete.txt");
     expect(delRes.status).toBe(200);
-    const statRes = await fsStat("to-delete.txt");
+    const statRes = await h.statRaw("to-delete.txt");
     expect(statRes.status).toBe(404);
   });
 
   it("rename moves file", async () => {
     await fsWrite("old-name.txt", "renamed");
-    const renameRes = await fsRename("old-name.txt", "new-name.txt");
+    const renameRes = await h.rename("old-name.txt", "new-name.txt");
     expect(renameRes.status).toBe(200);
     const content = await fsRead("new-name.txt");
     expect(content).toBe("renamed");
-    const statRes = await fsStat("old-name.txt");
+    const statRes = await h.statRaw("old-name.txt");
     expect(statRes.status).toBe(404);
   });
 
   it("exists returns true/false", async () => {
-    expect(await fsExists("hello.txt")).toBe(true);
-    expect(await fsExists("nope.txt")).toBe(false);
+    expect(await h.exists("hello.txt")).toBe(true);
+    expect(await h.exists("nope.txt")).toBe(false);
   });
 
   it("copyFile via read+write round-trip", async () => {
@@ -194,7 +139,7 @@ describe("child_process shim (via HTTP — same backing as node:child_process sh
   });
 
   it("exec with env", async () => {
-    const res = await SELF.fetch(`http://localhost/workspace/${W}/exec`, {
+    const res = await SELF.fetch(`http://localhost/workspace/shim-test/exec`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ command: "env", env: { MY_VAR: "hello123" } }),
@@ -262,7 +207,7 @@ describe("child_process shim (via HTTP — same backing as node:child_process sh
   });
 
   it("exec ls lists directory", async () => {
-    await fsMkdir("ls-dir");
+    await h.mkdir("ls-dir");
     await fsWrite("ls-dir/file1.txt", "1");
     await fsWrite("ls-dir/file2.txt", "2");
     const res = await exec("ls ls-dir");

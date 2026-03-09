@@ -20,53 +20,14 @@
  * proving the API surface is sufficient even before container is available.
  */
 
-import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll } from "vitest";
+import { createHelpers } from "../test/helpers";
 
-const W = "conformance-simple-git";
-
-function exec(command: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/exec`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ command }),
-  }).then((r) => r.json() as Promise<{ exitCode: number; stdout: string; stderr: string }>);
-}
-
-function writeFile(path: string, content: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/write`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, content }),
-  });
-}
-
-function readFile(path: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/read`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path }),
-  }).then((r) => r.json() as Promise<{ content: string }>);
-}
-
-function exists(path: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/exists?path=${path}`)
-    .then((r) => r.json() as Promise<{ exists: boolean }>)
-    .then((d) => d.exists);
-}
-
-function readdir(path: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/readdir?path=${path}`)
-    .then((r) => r.json() as Promise<Array<{ name: string; isDirectory: boolean }>>);
-}
+const { exec, writeFile, readFile, exists, readdir, stat, init } = createHelpers("conformance-simple-git");
 
 describe("simple-git conformance", () => {
   beforeAll(async () => {
-    await SELF.fetch(`http://localhost/workspace/${W}/init`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ owner: "test", name: "simple-git-conformance" }),
-    });
+    await init("test", "simple-git-conformance");
   });
 
   // =====================================================================
@@ -146,12 +107,10 @@ describe("simple-git conformance", () => {
 
     it("detects size changes via stat", async () => {
       await writeFile("repo/small.txt", "tiny");
-      const stat1Res = await SELF.fetch(`http://localhost/workspace/${W}/fs/stat?path=repo/small.txt`);
-      const stat1 = (await stat1Res.json()) as { size: number };
+      const stat1 = await stat("repo/small.txt");
 
       await writeFile("repo/small.txt", "this is now much larger content than before");
-      const stat2Res = await SELF.fetch(`http://localhost/workspace/${W}/fs/stat?path=repo/small.txt`);
-      const stat2 = (await stat2Res.json()) as { size: number };
+      const stat2 = await stat("repo/small.txt");
 
       expect(stat2.size).toBeGreaterThan(stat1.size);
     });

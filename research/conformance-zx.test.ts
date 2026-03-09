@@ -19,48 +19,14 @@
  * on Cloudflare Durable Objects.
  */
 
-import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll } from "vitest";
+import { createHelpers } from "../test/helpers";
 
-const W = "conformance-zx";
-
-function exec(command: string, opts?: { env?: Record<string, string> }) {
-  return SELF.fetch(`http://localhost/workspace/${W}/exec`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ command, ...opts }),
-  }).then((r) => r.json() as Promise<{ exitCode: number; stdout: string; stderr: string }>);
-}
-
-function writeFile(path: string, content: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/write`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, content }),
-  });
-}
-
-function readFile(path: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/read`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path }),
-  }).then((r) => r.json() as Promise<{ content: string }>);
-}
-
-function exists(path: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/exists?path=${path}`)
-    .then((r) => r.json() as Promise<{ exists: boolean }>)
-    .then((d) => d.exists);
-}
+const { exec, writeFile, readFile, exists, listProcesses, init } = createHelpers("conformance-zx");
 
 describe("zx conformance", () => {
   beforeAll(async () => {
-    await SELF.fetch(`http://localhost/workspace/${W}/init`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ owner: "test", name: "zx-conformance" }),
-    });
+    await init("test", "zx-conformance");
   });
 
   // -----------------------------------------------------------------------
@@ -424,12 +390,7 @@ describe("zx conformance", () => {
   // zx: check what ran
   // -----------------------------------------------------------------------
   it("process list tracks all zx-like commands", async () => {
-    const listRes = await SELF.fetch(`http://localhost/workspace/${W}/process/list`);
-    const processes = (await listRes.json()) as Array<{
-      pid: number;
-      command: string;
-      status: string;
-    }>;
+    const processes = await listProcesses();
     expect(processes.length).toBeGreaterThan(10);
     // All should be completed
     for (const p of processes.slice(0, 20)) {

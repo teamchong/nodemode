@@ -86,7 +86,8 @@ export function copyFile(src: string, dest: string, flagsOrCb?: number | Callbac
   const callback = typeof flagsOrCb === "function" ? flagsOrCb : cb!;
   getFs().readFile(String(src)).then((data) => {
     if (!data) throw new Error(`ENOENT: no such file or directory, open '${src}'`);
-    return getFs().writeFile(String(dest), data);
+    const s = getFs().stat(String(src));
+    return getFs().writeFile(String(dest), data, s?.mode);
   }).then(() => callback(null)).catch(callback);
 }
 
@@ -250,7 +251,8 @@ export const promises = {
   async copyFile(src: string, dest: string): Promise<void> {
     const data = await getFs().readFile(String(src));
     if (!data) throw new Error(`ENOENT: no such file or directory, copyFile '${src}'`);
-    await getFs().writeFile(String(dest), data);
+    const s = getFs().stat(String(src));
+    await getFs().writeFile(String(dest), data, s?.mode);
   },
 
   async rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void> {

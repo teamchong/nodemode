@@ -18,58 +18,14 @@
  * With nodemode: Full dev environment on Durable Objects + R2 + Containers.
  */
 
-import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll } from "vitest";
+import { createHelpers } from "../test/helpers";
 
-const W = "conformance-opencode";
-
-function exec(command: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/exec`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ command }),
-  }).then((r) => r.json() as Promise<{ exitCode: number; stdout: string; stderr: string }>);
-}
-
-function writeFile(path: string, content: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/write`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, content }),
-  });
-}
-
-function readFile(path: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/read`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path }),
-  }).then((r) => r.json() as Promise<{ content: string }>);
-}
-
-function readdir(path: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/readdir?path=${path}`)
-    .then((r) => r.json() as Promise<Array<{ name: string; isDirectory: boolean }>>);
-}
-
-function stat(path: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/stat?path=${path}`)
-    .then((r) => r.json() as Promise<{ size: number; isDirectory: boolean; mtime: number }>);
-}
-
-function exists(path: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/exists?path=${path}`)
-    .then((r) => r.json() as Promise<{ exists: boolean }>)
-    .then((d) => d.exists);
-}
+const { exec, execRaw, writeFile, readFile, readdir, stat, exists, init } = createHelpers("conformance-opencode");
 
 describe("opencode/AI agent conformance", () => {
   beforeAll(async () => {
-    await SELF.fetch(`http://localhost/workspace/${W}/init`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ owner: "test", name: "opencode-conformance" }),
-    });
+    await init("test", "opencode-conformance");
   });
 
   // =====================================================================
@@ -589,11 +545,7 @@ describe("opencode/AI agent conformance", () => {
     });
 
     it("handles empty command gracefully", async () => {
-      const res = await SELF.fetch(`http://localhost/workspace/${W}/exec`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "  " }),
-      });
+      const res = await execRaw("  ");
       // Non-empty but whitespace-only command
       expect(res.status).toBe(200);
     });

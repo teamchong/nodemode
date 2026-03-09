@@ -17,53 +17,14 @@
  * by testing the fs + exec primitives each tool relies on.
  */
 
-import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll } from "vitest";
+import { createHelpers } from "../test/helpers";
 
-const W = "conformance-tooling";
-
-function exec(command: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/exec`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ command }),
-  }).then((r) => r.json() as Promise<{ exitCode: number; stdout: string; stderr: string }>);
-}
-
-function writeFile(path: string, content: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/write`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, content }),
-  });
-}
-
-function readFile(path: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/read`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path }),
-  }).then((r) => r.json() as Promise<{ content: string }>);
-}
-
-function exists(path: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/exists?path=${path}`)
-    .then((r) => r.json() as Promise<{ exists: boolean }>)
-    .then((d) => d.exists);
-}
-
-function readdir(path: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/readdir?path=${path}`)
-    .then((r) => r.json() as Promise<Array<{ name: string; isDirectory: boolean }>>);
-}
+const { exec, writeFile, readFile, exists, readdir, stat, listProcesses, getProcess, init } = createHelpers("conformance-tooling");
 
 describe("lint-staged / nodemon / build-tools conformance", () => {
   beforeAll(async () => {
-    await SELF.fetch(`http://localhost/workspace/${W}/init`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ owner: "test", name: "tooling-conformance" }),
-    });
+    await init("test", "tooling-conformance");
 
     // Set up a project with lint issues
     await exec("mkdir -p project/src");
@@ -154,17 +115,11 @@ describe("lint-staged / nodemon / build-tools conformance", () => {
     it("detects file changes by comparing stat mtime", async () => {
       // Write initial version
       await writeFile("project/src/server.ts", 'console.log("v1");\n');
-      const stat1Res = await SELF.fetch(
-        `http://localhost/workspace/${W}/fs/stat?path=project/src/server.ts`,
-      );
-      const stat1 = (await stat1Res.json()) as { mtime: number };
+      const stat1 = await stat("project/src/server.ts");
 
       // Write updated version
       await writeFile("project/src/server.ts", 'console.log("v2");\n');
-      const stat2Res = await SELF.fetch(
-        `http://localhost/workspace/${W}/fs/stat?path=project/src/server.ts`,
-      );
-      const stat2 = (await stat2Res.json()) as { mtime: number };
+      const stat2 = await stat("project/src/server.ts");
 
       // mtime should be updated
       expect(stat2.mtime).toBeGreaterThanOrEqual(stat1.mtime);
@@ -279,15 +234,7 @@ describe("lint-staged / nodemon / build-tools conformance", () => {
 
   describe("process tracking", () => {
     it("tracks all executed commands", async () => {
-      const listRes = await SELF.fetch(
-        `http://localhost/workspace/${W}/process/list`,
-      );
-      const processes = (await listRes.json()) as Array<{
-        pid: number;
-        command: string;
-        status: string;
-        exitCode: number;
-      }>;
+      const processes = await listProcesses();
 
       expect(processes.length).toBeGreaterThan(0);
       // All should be done
@@ -300,24 +247,11 @@ describe("lint-staged / nodemon / build-tools conformance", () => {
     it("can retrieve specific process by pid", async () => {
       await exec("echo process-tracker-test");
 
-      const listRes = await SELF.fetch(
-        `http://localhost/workspace/${W}/process/list`,
-      );
-      const processes = (await listRes.json()) as Array<{
-        pid: number;
-        command: string;
-      }>;
+      const processes = await listProcesses();
       const found = processes.find((p) => p.command === "echo process-tracker-test");
       expect(found).toBeDefined();
 
-      const getRes = await SELF.fetch(
-        `http://localhost/workspace/${W}/process/get?pid=${found!.pid}`,
-      );
-      const proc = (await getRes.json()) as {
-        pid: number;
-        command: string;
-        stdout: string;
-      };
+      const proc = await getProcess(found!.pid);
       expect(proc.stdout).toContain("process-tracker-test");
     });
   });

@@ -518,7 +518,8 @@ export class ProcessManager {
     const dst = resolvePath(cwd, files[1]);
     const data = await this.fs.readFile(src);
     if (data === null) return fail(`cp: ${files[0]}: No such file or directory\n`);
-    await this.fs.writeFile(dst, data);
+    const stat = this.fs.stat(src);
+    await this.fs.writeFile(dst, data, stat?.mode);
     return ok("");
   }
 

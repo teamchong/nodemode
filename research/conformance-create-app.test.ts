@@ -16,53 +16,14 @@
  * With nodemode: Full scaffolding on DO + R2, npm install in Container.
  */
 
-import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll } from "vitest";
+import { createHelpers } from "../test/helpers";
 
-const W = "conformance-create-app";
-
-function exec(command: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/exec`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ command }),
-  }).then((r) => r.json() as Promise<{ exitCode: number; stdout: string; stderr: string }>);
-}
-
-function writeFile(path: string, content: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/write`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, content }),
-  });
-}
-
-function readFile(path: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/read`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path }),
-  }).then((r) => r.json() as Promise<{ content: string }>);
-}
-
-function readdir(path: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/readdir?path=${path}`)
-    .then((r) => r.json() as Promise<Array<{ name: string; isDirectory: boolean }>>);
-}
-
-function exists(path: string) {
-  return SELF.fetch(`http://localhost/workspace/${W}/fs/exists?path=${path}`)
-    .then((r) => r.json() as Promise<{ exists: boolean }>)
-    .then((d) => d.exists);
-}
+const { exec, writeFile, readFile, readdir, exists, init } = createHelpers("conformance-create-app");
 
 describe("create-app / scaffolding conformance", () => {
   beforeAll(async () => {
-    await SELF.fetch(`http://localhost/workspace/${W}/init`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ owner: "test", name: "create-app-conformance" }),
-    });
+    await init("test", "create-app-conformance");
   });
 
   // =====================================================================
