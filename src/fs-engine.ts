@@ -282,7 +282,7 @@ export class FsEngine {
     return Array.from(entries, ([name, isDirectory]) => ({
       name,
       isDirectory,
-    }));
+    })).sort((a, b) => a.name.localeCompare(b.name));
   }
 
   // -- Metadata operations --
