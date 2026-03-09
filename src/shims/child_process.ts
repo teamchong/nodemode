@@ -98,7 +98,7 @@ export function execSync(_command: string, _options?: ExecOptions): string {
 // -- spawn --
 
 export function spawn(command: string, args?: string[], options?: ExecOptions): ChildProcessLike {
-  const fullCommand = args ? `${command} ${args.join(" ")}` : command;
+  const fullCommand = args ? `${command} ${args.map(quoteArg).join(" ")}` : command;
   const cp = new ChildProcessLike(fullCommand);
 
   getPm().exec(fullCommand, {
@@ -125,7 +125,7 @@ export function spawn(command: string, args?: string[], options?: ExecOptions): 
 export function execFile(file: string, args?: string[], optionsOrCb?: ExecOptions | ExecCallback, cb?: ExecCallback): ChildProcessLike {
   const callback = typeof optionsOrCb === "function" ? optionsOrCb : cb;
   const options = typeof optionsOrCb === "object" ? optionsOrCb : {};
-  const command = args ? `${file} ${args.join(" ")}` : file;
+  const command = args ? `${file} ${args.map(quoteArg).join(" ")}` : file;
   return exec(command, options, callback);
 }
 
@@ -158,6 +158,12 @@ class StreamLike extends MiniEmitter {
   pipe(dest: unknown) { return dest; }
   setEncoding() { return this; }
   read() { return null; }
+}
+
+// Quote args containing spaces/special chars for shell execution
+function quoteArg(arg: string): string {
+  if (/^[a-zA-Z0-9_./:=@%^,+-]+$/.test(arg)) return arg;
+  return `'${arg.replace(/'/g, "'\\''")}'`;
 }
 
 // -- Default export --
