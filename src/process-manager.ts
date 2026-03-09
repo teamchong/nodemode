@@ -522,7 +522,8 @@ export class ProcessManager {
         return fail(`rm: ${file}: No such file or directory\n`);
       }
       if (stat.isDirectory) {
-        await this.fs.rmdir(path, recursive);
+        if (!recursive) return fail(`rm: cannot remove '${file}': Is a directory\n`);
+        await this.fs.rmdir(path, true);
       } else {
         await this.fs.unlink(path);
       }
