@@ -5,104 +5,43 @@
 
 import { SELF } from "cloudflare:test";
 
+function post(url: string, body: unknown) {
+  return SELF.fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function get<T>(url: string): Promise<T> {
+  return SELF.fetch(url).then((r) => r.json() as Promise<T>);
+}
+
 export function createHelpers(workspace: string) {
   const base = `http://localhost/workspace/${workspace}`;
+  const q = (action: string, path: string) => `${base}/${action}?path=${encodeURIComponent(path)}`;
 
   return {
-    async init(owner: string, name: string) {
-      return SELF.fetch(`${base}/init`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ owner, name }),
-      });
-    },
+    init: (owner: string, name: string) => post(`${base}/init`, { owner, name }),
+    execRaw: (command: string) => post(`${base}/exec`, { command }),
+    writeFile: (path: string, content: string) => post(`${base}/fs/write`, { path, content }),
+    unlink: (path: string) => post(`${base}/fs/unlink`, { path }),
+    rename: (oldPath: string, newPath: string) => post(`${base}/fs/rename`, { oldPath, newPath }),
+    mkdir: (path: string) => post(`${base}/fs/mkdir`, { path, recursive: true }),
+    statRaw: (path: string) => SELF.fetch(q("fs/stat", path)),
 
     async exec(command: string, opts?: { env?: Record<string, string> }) {
-      const res = await SELF.fetch(`${base}/exec`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command, ...opts }),
-      });
+      const res = await post(`${base}/exec`, { command, ...opts });
       return res.json() as Promise<{ exitCode: number; stdout: string; stderr: string }>;
     },
-
-    async writeFile(path: string, content: string) {
-      return SELF.fetch(`${base}/fs/write`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, content }),
-      });
-    },
-
     async readFile(path: string) {
-      const res = await SELF.fetch(`${base}/fs/read`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path }),
-      });
+      const res = await post(`${base}/fs/read`, { path });
       return res.json() as Promise<{ content: string }>;
     },
-
-    async statRaw(path: string) {
-      return SELF.fetch(`${base}/fs/stat?path=${encodeURIComponent(path)}`);
-    },
-
-    async stat(path: string) {
-      return SELF.fetch(`${base}/fs/stat?path=${encodeURIComponent(path)}`)
-        .then((r) => r.json() as Promise<{ size: number; isDirectory: boolean; mtime: number; mode: number }>);
-    },
-
-    async readdir(path: string) {
-      return SELF.fetch(`${base}/fs/readdir?path=${encodeURIComponent(path)}`)
-        .then((r) => r.json() as Promise<Array<{ name: string; isDirectory: boolean }>>);
-    },
-
-    async exists(path: string) {
-      return SELF.fetch(`${base}/fs/exists?path=${encodeURIComponent(path)}`)
-        .then((r) => r.json() as Promise<{ exists: boolean }>)
-        .then((d) => d.exists);
-    },
-
-    async unlink(path: string) {
-      return SELF.fetch(`${base}/fs/unlink`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path }),
-      });
-    },
-
-    async rename(oldPath: string, newPath: string) {
-      return SELF.fetch(`${base}/fs/rename`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ oldPath, newPath }),
-      });
-    },
-
-    async mkdir(path: string) {
-      return SELF.fetch(`${base}/fs/mkdir`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, recursive: true }),
-      });
-    },
-
-    async listProcesses() {
-      const res = await SELF.fetch(`${base}/process/list`);
-      return res.json() as Promise<Array<{ pid: number; command: string; status: string; exitCode: number | null }>>;
-    },
-
-    async getProcess(pid: number) {
-      const res = await SELF.fetch(`${base}/process/get?pid=${pid}`);
-      return res.json() as Promise<{ pid: number; command: string; stdout: string; stderr: string }>;
-    },
-
-    async execRaw(command: string) {
-      return SELF.fetch(`${base}/exec`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command }),
-      });
-    },
+    stat: (path: string) => get<{ size: number; isDirectory: boolean; mtime: number; mode: number }>(q("fs/stat", path)),
+    readdir: (path: string) => get<Array<{ name: string; isDirectory: boolean }>>(q("fs/readdir", path)),
+    exists: (path: string) => get<{ exists: boolean }>(q("fs/exists", path)).then((d) => d.exists),
+    listProcesses: () => get<Array<{ pid: number; command: string; status: string; exitCode: number | null }>>(`${base}/process/list`),
+    getProcess: (pid: number) => get<{ pid: number; command: string; stdout: string; stderr: string }>(`${base}/process/get?pid=${pid}`),
   };
 }
