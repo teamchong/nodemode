@@ -521,7 +521,13 @@ export class ProcessManager {
     const files = args.filter((a) => !a.startsWith("-"));
     if (files.length < 2) return fail("cp: missing operand\n");
     const src = resolvePath(cwd, files[0]);
-    const dst = resolvePath(cwd, files[1]);
+    let dst = resolvePath(cwd, files[1]);
+    // If dst is an existing directory, copy into it
+    const dstStat = this.fs.stat(dst);
+    if (dstStat?.isDirectory) {
+      const basename = src.split("/").pop() || src;
+      dst = dst ? `${dst}/${basename}` : basename;
+    }
     const data = await this.fs.readFile(src);
     if (data === null) return fail(`cp: ${files[0]}: No such file or directory\n`);
     const stat = this.fs.stat(src);
@@ -533,7 +539,13 @@ export class ProcessManager {
     const files = args.filter((a) => !a.startsWith("-"));
     if (files.length < 2) return fail("mv: missing operand\n");
     const src = resolvePath(cwd, files[0]);
-    const dst = resolvePath(cwd, files[1]);
+    let dst = resolvePath(cwd, files[1]);
+    // If dst is an existing directory, move into it
+    const dstStat = this.fs.stat(dst);
+    if (dstStat?.isDirectory) {
+      const basename = src.split("/").pop() || src;
+      dst = dst ? `${dst}/${basename}` : basename;
+    }
     await this.fs.rename(src, dst);
     return ok("");
   }

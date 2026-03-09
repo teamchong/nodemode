@@ -339,9 +339,20 @@ export class FsEngine {
     const stat = this.stat(oldNorm);
     if (!stat) throw new Error(`ENOENT: no such file '${oldPath}'`);
 
+    // Remove destination if it exists (rename overwrites)
+    const destStat = this.stat(newNorm);
+    if (destStat) {
+      if (destStat.isDirectory) {
+        await this.rmdir(newNorm, true);
+      } else {
+        await this.unlink(newNorm);
+      }
+    }
+
+    this.ensureParentDirs(newNorm);
+
     if (stat.isDirectory) {
       // Rename directory: update all children paths
-      this.ensureParentDirs(newNorm);
       const children = this.sql
         .exec("SELECT path, r2_key FROM files WHERE path = ? OR path LIKE ? || '/%'", oldNorm, oldNorm)
         .toArray();
@@ -354,7 +365,6 @@ export class FsEngine {
           ? this.r2Key(newChildPath)
           : "";
 
-        // Copy file content in R2 if it has an r2_key
         if (childR2Key) {
           const obj = await this.bucket.get(childR2Key);
           if (obj) {
@@ -363,7 +373,6 @@ export class FsEngine {
           }
         }
 
-        // Update index
         this.sql.exec(
           "UPDATE files SET path = ?, r2_key = ? WHERE path = ?",
           newChildPath,
@@ -372,7 +381,6 @@ export class FsEngine {
         );
       }
 
-      // Evict old cache entries
       this.sql.exec(
         "DELETE FROM file_cache WHERE path = ? OR path LIKE ? || '/%'",
         oldNorm,
@@ -384,7 +392,6 @@ export class FsEngine {
       const obj = await this.bucket.get(oldKey);
       if (!obj) throw new Error(`ENOENT: no such file '${oldPath}'`);
       const newKey = this.r2Key(newNorm);
-      this.ensureParentDirs(newNorm);
       await this.bucket.put(newKey, obj.body);
       await this.bucket.delete(oldKey);
 
