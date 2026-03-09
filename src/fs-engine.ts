@@ -29,7 +29,6 @@ export interface DirEntry {
 
 const MAX_CACHE_FILE_SIZE = 64 * 1024; // Cache files smaller than 64KB in SQLite
 const MAX_CACHE_ENTRIES = 500; // Evict oldest entries beyond this count
-const PATH_SEP = "/";
 
 export class FsEngine {
   constructor(
@@ -144,7 +143,9 @@ export class FsEngine {
       const merged = new Uint8Array(existing.byteLength + append.byteLength);
       merged.set(existing, 0);
       merged.set(append, existing.byteLength);
-      await this.writeFile(path, merged);
+      // Preserve existing file mode
+      const stat = this.stat(path);
+      await this.writeFile(path, merged, stat?.mode);
     } else {
       await this.writeFile(path, append);
     }
@@ -404,10 +405,10 @@ export class FsEngine {
   }
 
   private ensureParentDirs(path: string): void {
-    const parts = path.split(PATH_SEP);
+    const parts = path.split("/");
     const now = Date.now();
     for (let i = 1; i < parts.length; i++) {
-      const dirPath = parts.slice(0, i).join(PATH_SEP);
+      const dirPath = parts.slice(0, i).join("/");
       if (!dirPath) continue;
       this.sql.exec(
         `INSERT OR IGNORE INTO files (path, r2_key, size, mode, mtime, is_dir)
@@ -436,9 +437,6 @@ export class FsEngine {
 }
 
 function normalizePath(path: string): string {
-  // Remove leading/trailing slashes, collapse double slashes
-  return path
-    .replace(/^\/+/, "")
-    .replace(/\/+$/, "")
-    .replace(/\/+/g, "/");
+  // Collapse multiple slashes, strip leading/trailing
+  return path.replace(/\/+/g, "/").replace(/^\/|\/$/g, "");
 }

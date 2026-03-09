@@ -463,7 +463,8 @@ export class ProcessManager {
         ? (line) => line.toLowerCase().includes(pattern.toLowerCase())
         : (line) => line.includes(pattern);
     }
-    const matches = content.split("\n").filter(test);
+    const lines = content.endsWith("\n") ? content.slice(0, -1).split("\n") : content.split("\n");
+    const matches = lines.filter(test);
     if (matches.length === 0) return { exitCode: 1, stdout: "", stderr: "" };
     return ok(matches.join("\n") + "\n");
   }
@@ -537,14 +538,10 @@ export class ProcessManager {
 
     let pass = false;
     switch (args[0]) {
-      case "-f": {
-        const stat = args[1] ? this.fs.stat(resolvePath(cwd, args[1])) : null;
-        pass = !!stat && !stat.isDirectory;
-        break;
-      }
+      case "-f":
       case "-d": {
         const stat = args[1] ? this.fs.stat(resolvePath(cwd, args[1])) : null;
-        pass = !!stat?.isDirectory;
+        pass = args[0] === "-f" ? !!stat && !stat.isDirectory : !!stat?.isDirectory;
         break;
       }
       case "-e":
