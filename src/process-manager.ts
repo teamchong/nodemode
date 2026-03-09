@@ -276,12 +276,10 @@ export class ProcessManager {
       case "whoami":
         return ok((options.env?.["USER"] || "nodemode") + "\n");
 
-      case "env":
-        return ok(
-          Object.entries(options.env || {})
-            .map(([k, v]) => `${k}=${v}`)
-            .join("\n") + "\n",
-        );
+      case "env": {
+        const entries = Object.entries(options.env || {});
+        return ok(entries.length > 0 ? entries.map(([k, v]) => `${k}=${v}`).join("\n") + "\n" : "");
+      }
 
       case "cat":
         return this.builtinCat(args, cwd, options);

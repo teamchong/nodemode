@@ -30,7 +30,6 @@
   },
   "files": [
     "src/**/*.ts",
-    "src/**/*.sql",
     "bin/nodemode.mjs",
     "bin/template/"
   ],

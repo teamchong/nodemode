@@ -194,10 +194,14 @@ describe("child_process shim (via HTTP — same backing as node:child_process sh
   });
 
   it("exec with env", async () => {
-    const res = await exec("env");
+    const res = await SELF.fetch(`http://localhost/workspace/${W}/exec`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ command: "env", env: { MY_VAR: "hello123" } }),
+    });
     expect(res.status).toBe(200);
     const data = (await res.json()) as { stdout: string };
-    expect(data.stdout.length).toBeGreaterThan(0);
+    expect(data.stdout).toContain("MY_VAR=hello123");
   });
 
   it("exec non-zero exit returns error", async () => {
