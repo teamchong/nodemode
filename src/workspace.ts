@@ -483,7 +483,7 @@ export class Workspace extends DurableObject<Env> {
       });
 
       for (const obj of listed.objects) {
-        const path = obj.key.slice(prefix.length);
+        const path = normalizePath(obj.key.slice(prefix.length));
         if (!path) continue;
         r2Paths.add(path);
         this.upsertFileIndex(path, obj.key, obj.size);
@@ -534,7 +534,7 @@ export class Workspace extends DurableObject<Env> {
     try {
       msg = JSON.parse(message);
     } catch {
-      ws.send(JSON.stringify({ type: "error", error: "Invalid JSON" }));
+      try { ws.send(JSON.stringify({ type: "error", error: "Invalid JSON" })); } catch { /* disconnected */ }
       return;
     }
 
@@ -544,7 +544,7 @@ export class Workspace extends DurableObject<Env> {
         result = await this.processes.exec(msg.command, { cwd: msg.cwd });
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
-        ws.send(JSON.stringify({ type: "error", error: errMsg }));
+        try { ws.send(JSON.stringify({ type: "error", error: errMsg })); } catch { /* disconnected */ }
         return;
       }
 
@@ -555,12 +555,14 @@ export class Workspace extends DurableObject<Env> {
       if (result.stderr) this.sql.exec(ins, "stderr", result.stderr, now);
       this.trimTerminalBuffer();
 
-      ws.send(JSON.stringify({
-        type: "result",
-        exitCode: result.exitCode,
-        stdout: result.stdout,
-        stderr: result.stderr,
-      }));
+      try {
+        ws.send(JSON.stringify({
+          type: "result",
+          exitCode: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+        }));
+      } catch { /* client disconnected */ }
 
       // Broadcast to other connected clients
       for (const other of this.ctx.getWebSockets()) {

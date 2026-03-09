@@ -698,4 +698,19 @@ describe("nodemode", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe("0");
   });
+
+  // -- Tab whitespace and newline separator --
+
+  it("handles tab as word separator in commands", async () => {
+    const result = await exec("echo\thello\tworld");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("hello world\n");
+  });
+
+  it("handles newline as command separator", async () => {
+    const result = await exec("echo first\necho second");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("first");
+    expect(result.stdout).toContain("second");
+  });
 });

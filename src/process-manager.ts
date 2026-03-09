@@ -121,7 +121,7 @@ export class ProcessManager {
   }
 
   private async execPipeline(commands: string[], options: SpawnOptions): Promise<SpawnResult> {
-    let input = "";
+    let input = options.stdin ?? "";
     let lastResult: SpawnResult = { exitCode: 0, stdout: "", stderr: "" };
     const allStderr: string[] = [];
 
@@ -694,7 +694,7 @@ function splitChain(command: string): ChainSegment[] {
     else if (inSingle || inDouble) { current += ch; }
     else if (ch === "&" && command[i + 1] === "&") { flush("&&"); i++; }
     else if (ch === "|" && command[i + 1] === "|") { flush("||"); i++; }
-    else if (ch === ";") { flush(";"); }
+    else if (ch === ";" || ch === "\n") { flush(";"); }
     else { current += ch; }
   }
   if (current.trim()) flush("");
@@ -730,7 +730,7 @@ function parseCommand(command: string): { cmd: string; args: string[] } {
         // Outside quotes: backslash escapes any character
         current += next;
       }
-    } else if (ch === " " && !inSingle && !inDouble) {
+    } else if ((ch === " " || ch === "\t") && !inSingle && !inDouble) {
       if (current || hasQuote) {
         tokens.push(current);
         current = "";

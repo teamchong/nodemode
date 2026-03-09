@@ -426,6 +426,17 @@ export class FsEngine {
 
   ensureParentDirs(path: string): void {
     const parts = path.split("/");
+    if (parts.length <= 1) return; // No parents needed
+
+    // Fast path: if immediate parent exists, all ancestors must too
+    const immediateParent = parts.slice(0, -1).join("/");
+    if (immediateParent) {
+      const exists = this.sql
+        .exec("SELECT 1 FROM files WHERE path = ? LIMIT 1", immediateParent)
+        .toArray();
+      if (exists.length > 0) return;
+    }
+
     const now = Date.now();
     for (let i = 1; i < parts.length; i++) {
       const dirPath = parts.slice(0, i).join("/");
