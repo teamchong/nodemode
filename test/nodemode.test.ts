@@ -1,12 +1,25 @@
-import {
-  env,
-  createExecutionContext,
-  SELF,
-} from "cloudflare:test";
+import { SELF } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
+import { createHelpers } from "./helpers";
 
 describe("nodemode", () => {
   const workspaceId = "test-workspace";
+  const {
+    init,
+    exec,
+    execRaw,
+    writeFile,
+    readFile,
+    stat,
+    statRaw,
+    readdir,
+    exists,
+    unlink,
+    rename,
+    mkdir,
+    listProcesses,
+    getProcess,
+  } = createHelpers(workspaceId);
 
   it("returns landing page on root", async () => {
     const res = await SELF.fetch("http://localhost/");
@@ -16,214 +29,74 @@ describe("nodemode", () => {
   });
 
   it("initializes a workspace", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/init`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ owner: "test", name: "my-workspace" }),
-      },
-    );
+    const res = await init("test", "my-workspace");
     expect(res.status).toBe(200);
     const data = (await res.json()) as { status: string };
     expect(data.status).toBe("initialized");
   });
 
   it("writes and reads a file", async () => {
-    // Write
-    const writeRes = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/write`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          path: "hello.txt",
-          content: "Hello, nodemode!",
-        }),
-      },
-    );
+    const writeRes = await writeFile("hello.txt", "Hello, nodemode!");
     expect(writeRes.status).toBe(200);
 
-    // Read
-    const readRes = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/read`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: "hello.txt" }),
-      },
-    );
-    expect(readRes.status).toBe(200);
-    const data = (await readRes.json()) as { content: string };
+    const data = await readFile("hello.txt");
     expect(data.content).toBe("Hello, nodemode!");
   });
 
   it("stats a file", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/stat?path=hello.txt`,
-    );
-    expect(res.status).toBe(200);
-    const stat = (await res.json()) as {
-      size: number;
-      isDirectory: boolean;
-    };
-    expect(stat.size).toBe(16);
-    expect(stat.isDirectory).toBe(false);
+    const s = await stat("hello.txt");
+    expect(s.size).toBe(16);
+    expect(s.isDirectory).toBe(false);
   });
 
   it("checks file existence", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/exists?path=hello.txt`,
-    );
-    const data = (await res.json()) as { exists: boolean };
-    expect(data.exists).toBe(true);
-
-    const res2 = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/exists?path=nope.txt`,
-    );
-    const data2 = (await res2.json()) as { exists: boolean };
-    expect(data2.exists).toBe(false);
+    expect(await exists("hello.txt")).toBe(true);
+    expect(await exists("nope.txt")).toBe(false);
   });
 
   it("creates directories", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/mkdir`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: "src/lib", recursive: true }),
-      },
-    );
+    const res = await mkdir("src/lib");
     expect(res.status).toBe(200);
   });
 
   it("lists directory contents", async () => {
-    // Write a file inside src/
-    await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/write`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          path: "src/index.ts",
-          content: 'console.log("hello");',
-        }),
-      },
-    );
+    await writeFile("src/index.ts", 'console.log("hello");');
 
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/readdir?path=src`,
-    );
-    expect(res.status).toBe(200);
-    const entries = (await res.json()) as Array<{
-      name: string;
-      isDirectory: boolean;
-    }>;
+    const entries = await readdir("src");
     const names = entries.map((e) => e.name);
     expect(names).toContain("index.ts");
     expect(names).toContain("lib");
   });
 
   it("executes echo command", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "echo hello world" }),
-      },
-    );
-    expect(res.status).toBe(200);
-    const result = (await res.json()) as {
-      exitCode: number;
-      stdout: string;
-    };
+    const result = await exec("echo hello world");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("hello world\n");
   });
 
   it("executes cat command", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "cat hello.txt" }),
-      },
-    );
-    expect(res.status).toBe(200);
-    const result = (await res.json()) as {
-      exitCode: number;
-      stdout: string;
-    };
+    const result = await exec("cat hello.txt");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("Hello, nodemode!");
   });
 
   it("executes ls command", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "ls" }),
-      },
-    );
-    expect(res.status).toBe(200);
-    const result = (await res.json()) as {
-      exitCode: number;
-      stdout: string;
-    };
+    const result = await exec("ls");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("hello.txt");
     expect(result.stdout).toContain("src");
   });
 
   it("executes pwd command", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "pwd" }),
-      },
-    );
-    expect(res.status).toBe(200);
-    const result = (await res.json()) as {
-      exitCode: number;
-      stdout: string;
-    };
+    const result = await exec("pwd");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("/\n");
   });
 
   it("executes grep command", async () => {
-    // Write a multi-line file
-    await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/write`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          path: "data.txt",
-          content: "apple\nbanana\ncherry\napricot\n",
-        }),
-      },
-    );
+    await writeFile("data.txt", "apple\nbanana\ncherry\napricot\n");
 
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "grep ap data.txt" }),
-      },
-    );
-    expect(res.status).toBe(200);
-    const result = (await res.json()) as {
-      exitCode: number;
-      stdout: string;
-    };
+    const result = await exec("grep ap data.txt");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("apple");
     expect(result.stdout).toContain("apricot");
@@ -231,76 +104,28 @@ describe("nodemode", () => {
   });
 
   it("reports command not found for unknown commands", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "npm install" }),
-      },
-    );
-    expect(res.status).toBe(200);
-    const result = (await res.json()) as {
-      exitCode: number;
-      stderr: string;
-    };
+    const result = await exec("npm install");
     expect(result.exitCode).toBe(127);
     expect(result.stderr).toContain("command not found");
   });
 
   it("renames a file", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/rename`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          oldPath: "hello.txt",
-          newPath: "greeting.txt",
-        }),
-      },
-    );
+    const res = await rename("hello.txt", "greeting.txt");
     expect(res.status).toBe(200);
 
-    // Old path gone
-    const gone = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/exists?path=hello.txt`,
-    );
-    expect(((await gone.json()) as { exists: boolean }).exists).toBe(false);
-
-    // New path exists
-    const exists = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/exists?path=greeting.txt`,
-    );
-    expect(((await exists.json()) as { exists: boolean }).exists).toBe(true);
+    expect(await exists("hello.txt")).toBe(false);
+    expect(await exists("greeting.txt")).toBe(true);
   });
 
   it("deletes a file", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/unlink`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: "data.txt" }),
-      },
-    );
+    const res = await unlink("data.txt");
     expect(res.status).toBe(200);
 
-    const exists = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/exists?path=data.txt`,
-    );
-    expect(((await exists.json()) as { exists: boolean }).exists).toBe(false);
+    expect(await exists("data.txt")).toBe(false);
   });
 
   it("lists processes", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/process/list`,
-    );
-    expect(res.status).toBe(200);
-    const processes = (await res.json()) as Array<{
-      pid: number;
-      command: string;
-    }>;
+    const processes = await listProcesses();
     expect(processes.length).toBeGreaterThan(0);
   });
 
@@ -323,34 +148,14 @@ describe("nodemode", () => {
   });
 
   it("non-builtin command falls back gracefully without container", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "node --version" }),
-      },
-    );
-    expect(res.status).toBe(200);
-    const result = (await res.json()) as {
-      exitCode: number;
-      stderr: string;
-    };
+    const result = await exec("node --version");
     expect(result.exitCode).toBe(127);
     expect(result.stderr).toContain("command not found");
     expect(result.stderr).toContain("node");
   });
 
   it("handles index invalidation with valid paths", async () => {
-    // Write a file first so it exists in R2
-    await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/write`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: "sync-test.txt", content: "synced" }),
-      },
-    );
+    await writeFile("sync-test.txt", "synced");
 
     const res = await SELF.fetch(
       `http://localhost/workspace/${workspaceId}/index-invalidate`,
@@ -392,50 +197,15 @@ describe("nodemode", () => {
   // -- Shell operator tests --
 
   it("executes piped commands (echo | grep)", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "echo hello world | grep hello" }),
-      },
-    );
-    expect(res.status).toBe(200);
-    const result = (await res.json()) as {
-      exitCode: number;
-      stdout: string;
-    };
+    const result = await exec("echo hello world | grep hello");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("hello world");
   });
 
   it("executes piped commands (cat file | head)", async () => {
-    // Write a multi-line file first
-    await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/write`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          path: "lines.txt",
-          content: "line1\nline2\nline3\nline4\nline5\n",
-        }),
-      },
-    );
+    await writeFile("lines.txt", "line1\nline2\nline3\nline4\nline5\n");
 
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "cat lines.txt | head -n 2" }),
-      },
-    );
-    expect(res.status).toBe(200);
-    const result = (await res.json()) as {
-      exitCode: number;
-      stdout: string;
-    };
+    const result = await exec("cat lines.txt | head -n 2");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("line1");
     expect(result.stdout).toContain("line2");
@@ -443,61 +213,20 @@ describe("nodemode", () => {
   });
 
   it("executes chained commands with &&", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "echo first && echo second" }),
-      },
-    );
-    expect(res.status).toBe(200);
-    const result = (await res.json()) as {
-      exitCode: number;
-      stdout: string;
-    };
+    const result = await exec("echo first && echo second");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("first");
     expect(result.stdout).toContain("second");
   });
 
   it("stops chain on && when first command fails", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          command: "cat nonexistent.txt && echo should-not-appear",
-        }),
-      },
-    );
-    expect(res.status).toBe(200);
-    const result = (await res.json()) as {
-      exitCode: number;
-      stdout: string;
-      stderr: string;
-    };
+    const result = await exec("cat nonexistent.txt && echo should-not-appear");
     expect(result.exitCode).toBe(1);
     expect(result.stdout).not.toContain("should-not-appear");
   });
 
   it("executes ; chain regardless of exit code", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          command: "echo first; echo second",
-        }),
-      },
-    );
-    expect(res.status).toBe(200);
-    const result = (await res.json()) as {
-      exitCode: number;
-      stdout: string;
-    };
+    const result = await exec("echo first; echo second");
     expect(result.stdout).toContain("first");
     expect(result.stdout).toContain("second");
   });
@@ -517,51 +246,20 @@ describe("nodemode", () => {
   // -- Builtin command tests --
 
   it("executes true and false commands", async () => {
-    const trueRes = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "true" }),
-      },
-    );
-    const trueResult = (await trueRes.json()) as { exitCode: number };
+    const trueResult = await exec("true");
     expect(trueResult.exitCode).toBe(0);
 
-    const falseRes = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "false" }),
-      },
-    );
-    const falseResult = (await falseRes.json()) as { exitCode: number };
+    const falseResult = await exec("false");
     expect(falseResult.exitCode).toBe(1);
   });
 
   it("executes head command", async () => {
-    await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/write`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          path: "numbers.txt",
-          content: "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n",
-        }),
-      },
+    await writeFile(
+      "numbers.txt",
+      "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n",
     );
 
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "head -n 3 numbers.txt" }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stdout: string };
+    const result = await exec("head -n 3 numbers.txt");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("1");
     expect(result.stdout).toContain("3");
@@ -569,41 +267,15 @@ describe("nodemode", () => {
   });
 
   it("executes tail command", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "tail -n 2 numbers.txt" }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stdout: string };
+    const result = await exec("tail -n 2 numbers.txt");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("12");
   });
 
   it("executes wc command", async () => {
-    await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/write`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          path: "wc-test.txt",
-          content: "hello world\nfoo bar\n",
-        }),
-      },
-    );
+    await writeFile("wc-test.txt", "hello world\nfoo bar\n");
 
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "wc wc-test.txt" }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stdout: string };
+    const result = await exec("wc wc-test.txt");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("2"); // 2 lines
     expect(result.stdout).toContain("4"); // 4 words
@@ -611,324 +283,106 @@ describe("nodemode", () => {
   });
 
   it("executes which command", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "which echo" }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stdout: string };
+    const result = await exec("which echo");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("/usr/bin/echo");
 
     // Unknown command
-    const res2 = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "which nonexistent" }),
-      },
-    );
-    const result2 = (await res2.json()) as { exitCode: number; stderr: string };
+    const result2 = await exec("which nonexistent");
     expect(result2.exitCode).toBe(1);
     expect(result2.stderr).toContain("not found");
   });
 
   it("executes basename and dirname", async () => {
-    const bnRes = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "basename /foo/bar/baz.txt" }),
-      },
-    );
-    const bnResult = (await bnRes.json()) as { exitCode: number; stdout: string };
+    const bnResult = await exec("basename /foo/bar/baz.txt");
     expect(bnResult.exitCode).toBe(0);
     expect(bnResult.stdout).toBe("baz.txt\n");
 
-    const dnRes = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "dirname /foo/bar/baz.txt" }),
-      },
-    );
-    const dnResult = (await dnRes.json()) as { exitCode: number; stdout: string };
+    const dnResult = await exec("dirname /foo/bar/baz.txt");
     expect(dnResult.exitCode).toBe(0);
     expect(dnResult.stdout).toBe("/foo/bar\n");
   });
 
   it("executes whoami and date", async () => {
-    const whoRes = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "whoami" }),
-      },
-    );
-    const whoResult = (await whoRes.json()) as { exitCode: number; stdout: string };
+    const whoResult = await exec("whoami");
     expect(whoResult.exitCode).toBe(0);
     expect(whoResult.stdout).toContain("nodemode");
 
-    const dateRes = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "date" }),
-      },
-    );
-    const dateResult = (await dateRes.json()) as { exitCode: number; stdout: string };
+    const dateResult = await exec("date");
     expect(dateResult.exitCode).toBe(0);
     // ISO date format
     expect(dateResult.stdout).toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 
   it("executes printf and sleep", async () => {
-    const printfRes = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "printf hello" }),
-      },
-    );
-    const printfResult = (await printfRes.json()) as { exitCode: number; stdout: string };
+    const printfResult = await exec("printf hello");
     expect(printfResult.exitCode).toBe(0);
     expect(printfResult.stdout).toBe("hello");
 
-    const sleepRes = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "sleep 1" }),
-      },
-    );
-    const sleepResult = (await sleepRes.json()) as { exitCode: number };
+    const sleepResult = await exec("sleep 1");
     expect(sleepResult.exitCode).toBe(0);
   });
 
   it("executes test command", async () => {
     // test -f on existing file
-    const testFile = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "test -f greeting.txt" }),
-      },
-    );
-    expect(((await testFile.json()) as { exitCode: number }).exitCode).toBe(0);
+    expect((await exec("test -f greeting.txt")).exitCode).toBe(0);
 
     // test -f on nonexistent
-    const testNo = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "test -f nope.txt" }),
-      },
-    );
-    expect(((await testNo.json()) as { exitCode: number }).exitCode).toBe(1);
+    expect((await exec("test -f nope.txt")).exitCode).toBe(1);
 
     // test -d on directory
-    const testDir = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "test -d src" }),
-      },
-    );
-    expect(((await testDir.json()) as { exitCode: number }).exitCode).toBe(0);
+    expect((await exec("test -d src")).exitCode).toBe(0);
 
     // test -e on existing
-    const testExists = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "test -e greeting.txt" }),
-      },
-    );
-    expect(((await testExists.json()) as { exitCode: number }).exitCode).toBe(0);
+    expect((await exec("test -e greeting.txt")).exitCode).toBe(0);
 
     // test -z on empty string
-    const testZ = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "test -z" }),
-      },
-    );
-    expect(((await testZ.json()) as { exitCode: number }).exitCode).toBe(0);
+    expect((await exec("test -z")).exitCode).toBe(0);
 
     // test -n on non-empty string
-    const testN = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "test -n hello" }),
-      },
-    );
-    expect(((await testN.json()) as { exitCode: number }).exitCode).toBe(0);
+    expect((await exec("test -n hello")).exitCode).toBe(0);
   });
 
   it("executes touch, cp, and mv via exec", async () => {
     // touch new file
-    await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "touch newfile.txt" }),
-      },
-    );
-    const exists = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/exists?path=newfile.txt`,
-    );
-    expect(((await exists.json()) as { exists: boolean }).exists).toBe(true);
+    await exec("touch newfile.txt");
+    expect(await exists("newfile.txt")).toBe(true);
 
     // cp
-    await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/write`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: "original.txt", content: "original content" }),
-      },
-    );
-    await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "cp original.txt copied.txt" }),
-      },
-    );
-    const readCopy = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/read`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: "copied.txt" }),
-      },
-    );
-    expect(((await readCopy.json()) as { content: string }).content).toBe("original content");
+    await writeFile("original.txt", "original content");
+    await exec("cp original.txt copied.txt");
+    expect((await readFile("copied.txt")).content).toBe("original content");
 
     // mv
-    await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "mv copied.txt moved.txt" }),
-      },
-    );
-    const movedExists = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/exists?path=moved.txt`,
-    );
-    expect(((await movedExists.json()) as { exists: boolean }).exists).toBe(true);
-    const copiedGone = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/exists?path=copied.txt`,
-    );
-    expect(((await copiedGone.json()) as { exists: boolean }).exists).toBe(false);
+    await exec("mv copied.txt moved.txt");
+    expect(await exists("moved.txt")).toBe(true);
+    expect(await exists("copied.txt")).toBe(false);
   });
 
   it("executes rm command", async () => {
-    await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/write`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: "to-delete.txt", content: "bye" }),
-      },
-    );
-
-    await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "rm to-delete.txt" }),
-      },
-    );
-
-    const exists = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/exists?path=to-delete.txt`,
-    );
-    expect(((await exists.json()) as { exists: boolean }).exists).toBe(false);
+    await writeFile("to-delete.txt", "bye");
+    await exec("rm to-delete.txt");
+    expect(await exists("to-delete.txt")).toBe(false);
   });
 
   it("executes mkdir via exec", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "mkdir -p deep/nested/dir" }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number };
+    const result = await exec("mkdir -p deep/nested/dir");
     expect(result.exitCode).toBe(0);
 
-    const testDir = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "test -d deep/nested/dir" }),
-      },
-    );
-    expect(((await testDir.json()) as { exitCode: number }).exitCode).toBe(0);
+    expect((await exec("test -d deep/nested/dir")).exitCode).toBe(0);
   });
 
   it("executes ls -l with long format", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "ls -l" }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stdout: string };
+    const result = await exec("ls -l");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("rwxr-xr-x");
     expect(result.stdout).toContain("nodemode");
   });
 
   it("executes grep -i for case insensitive", async () => {
-    await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/write`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          path: "case.txt",
-          content: "Hello\nhello\nHELLO\nworld\n",
-        }),
-      },
-    );
+    await writeFile("case.txt", "Hello\nhello\nHELLO\nworld\n");
 
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "grep -i hello case.txt" }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stdout: string };
+    const result = await exec("grep -i hello case.txt");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Hello");
     expect(result.stdout).toContain("hello");
@@ -939,15 +393,7 @@ describe("nodemode", () => {
   // -- Pipe and chain edge cases --
 
   it("pipes echo | wc", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "echo hello world | wc" }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stdout: string };
+    const result = await exec("echo hello world | wc");
     expect(result.exitCode).toBe(0);
     // "hello world\n" = 1 line, 2 words
     expect(result.stdout).toContain("1");
@@ -955,82 +401,32 @@ describe("nodemode", () => {
   });
 
   it("pipes echo | tail", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "echo a b c | cat" }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stdout: string };
+    const result = await exec("echo a b c | cat");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("a b c");
   });
 
   it("executes || operator (runs second on failure)", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          command: "cat nonexistent.txt || echo fallback",
-        }),
-      },
-    );
-    const result = (await res.json()) as {
-      exitCode: number;
-      stdout: string;
-    };
+    const result = await exec("cat nonexistent.txt || echo fallback");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("fallback");
   });
 
   it("executes || operator (skips second on success)", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          command: "echo success || echo should-not-run",
-        }),
-      },
-    );
-    const result = (await res.json()) as {
-      exitCode: number;
-      stdout: string;
-    };
+    const result = await exec("echo success || echo should-not-run");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("success");
     expect(result.stdout).not.toContain("should-not-run");
   });
 
   it("handles quoted strings in commands", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: 'echo "hello world"' }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stdout: string };
+    const result = await exec('echo "hello world"');
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("hello world\n");
   });
 
   it("handles single-quoted strings", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "echo 'hello world'" }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stdout: string };
+    const result = await exec("echo 'hello world'");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("hello world\n");
   });
@@ -1099,9 +495,7 @@ describe("nodemode", () => {
   });
 
   it("returns error for stat on nonexistent file", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/stat?path=no-such-file.txt`,
-    );
+    const res = await statRaw("no-such-file.txt");
     expect(res.status).toBe(404);
   });
 
@@ -1120,71 +514,31 @@ describe("nodemode", () => {
   });
 
   it("cat returns error for nonexistent file", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "cat nope-not-here.txt" }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stderr: string };
+    const result = await exec("cat nope-not-here.txt");
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("No such file");
   });
 
   it("rm returns error for nonexistent file", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "rm ghost-file.txt" }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stderr: string };
+    const result = await exec("rm ghost-file.txt");
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("No such file");
   });
 
   it("head returns error for nonexistent file", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "head ghost.txt" }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stderr: string };
+    const result = await exec("head ghost.txt");
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("No such file");
   });
 
   it("cp returns error for missing operand", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "cp only-one-arg" }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stderr: string };
+    const result = await exec("cp only-one-arg");
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("missing operand");
   });
 
   it("ls returns error for nonexistent directory", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "ls /no-such-dir" }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stderr: string };
+    const result = await exec("ls /no-such-dir");
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("No such file");
   });
@@ -1192,40 +546,15 @@ describe("nodemode", () => {
   // -- Process tracking --
 
   it("gets a specific process by pid", async () => {
-    // Run a command first
-    await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: "echo find-me" }),
-      },
-    );
+    await exec("echo find-me");
 
-    // List processes and get the latest pid
-    const listRes = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/process/list`,
-    );
-    const processes = (await listRes.json()) as Array<{
-      pid: number;
-      command: string;
-    }>;
+    const processes = await listProcesses();
     const found = processes.find((p) => p.command === "echo find-me");
     expect(found).toBeDefined();
 
-    // Get by pid
-    const getRes = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/process/get?pid=${found!.pid}`,
-    );
-    expect(getRes.status).toBe(200);
-    const proc = (await getRes.json()) as {
-      pid: number;
-      command: string;
-      status: string;
-      stdout: string;
-    };
+    const proc = await getProcess(found!.pid);
     expect(proc.command).toBe("echo find-me");
-    expect(proc.status).toBe("done");
+    expect((proc as any).status).toBe("done");
     expect(proc.stdout).toBe("find-me\n");
   });
 
@@ -1239,14 +568,7 @@ describe("nodemode", () => {
   // -- Workspace init edge case --
 
   it("returns already_initialized on second init", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/init`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ owner: "test2", name: "second" }),
-      },
-    );
+    const res = await init("test2", "second");
     expect(res.status).toBe(200);
     const data = (await res.json()) as { status: string };
     expect(data.status).toBe("already_initialized");
@@ -1278,17 +600,7 @@ describe("nodemode", () => {
   // -- Streaming read --
 
   it("reads file in streaming mode", async () => {
-    await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/fs/write`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          path: "stream-test.txt",
-          content: "streaming content here",
-        }),
-      },
-    );
+    await writeFile("stream-test.txt", "streaming content here");
 
     const res = await SELF.fetch(
       `http://localhost/workspace/${workspaceId}/fs/read`,
@@ -1307,18 +619,7 @@ describe("nodemode", () => {
   // -- Env command --
 
   it("executes env command with env vars", async () => {
-    const res = await SELF.fetch(
-      `http://localhost/workspace/${workspaceId}/exec`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          command: "env",
-          env: { FOO: "bar", NODE_ENV: "test" },
-        }),
-      },
-    );
-    const result = (await res.json()) as { exitCode: number; stdout: string };
+    const result = await exec("env", { env: { FOO: "bar", NODE_ENV: "test" } });
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("FOO=bar");
     expect(result.stdout).toContain("NODE_ENV=test");
