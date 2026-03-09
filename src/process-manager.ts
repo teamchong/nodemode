@@ -399,6 +399,7 @@ export class ProcessManager {
   }
 
   private async builtinWc(args: string[], cwd: string, options?: SpawnOptions): Promise<SpawnResult> {
+    const flags = args.filter((a) => a.startsWith("-")).join("");
     const files = args.filter((a) => !a.startsWith("-"));
     let content: string;
     let label: string;
@@ -418,7 +419,16 @@ export class ProcessManager {
     const wordCount = content.split(/\s+/).filter(Boolean).length;
     const byteCount = new TextEncoder().encode(content).byteLength;
     const suffix = label ? ` ${label}` : "";
-    return ok(`${lineCount} ${wordCount} ${byteCount}${suffix}\n`);
+    // Respect -l, -w, -c flags (default: show all)
+    const showLines = flags.includes("l");
+    const showWords = flags.includes("w");
+    const showBytes = flags.includes("c");
+    const showAll = !showLines && !showWords && !showBytes;
+    const parts: number[] = [];
+    if (showAll || showLines) parts.push(lineCount);
+    if (showAll || showWords) parts.push(wordCount);
+    if (showAll || showBytes) parts.push(byteCount);
+    return ok(`${parts.join(" ")}${suffix}\n`);
   }
 
   private async builtinGrep(args: string[], cwd: string, options?: SpawnOptions): Promise<SpawnResult> {
@@ -430,6 +440,8 @@ export class ProcessManager {
     }
     const pattern = nonFlags[0];
     const caseInsensitive = args.includes("-i");
+    const invert = args.includes("-v");
+    const countOnly = args.includes("-c");
 
     let content: string;
     if (nonFlags.length >= 2) {
@@ -449,14 +461,14 @@ export class ProcessManager {
       const regex = new RegExp(pattern, caseInsensitive ? "i" : "");
       test = (line) => regex.test(line);
     } catch {
-      // Fall back to literal string match if regex is invalid
       test = caseInsensitive
         ? (line) => line.toLowerCase().includes(pattern.toLowerCase())
         : (line) => line.includes(pattern);
     }
     const lines = content.endsWith("\n") ? content.slice(0, -1).split("\n") : content.split("\n");
-    const matches = lines.filter(test);
+    const matches = lines.filter((line) => invert ? !test(line) : test(line));
     if (matches.length === 0) return { exitCode: 1, stdout: "", stderr: "" };
+    if (countOnly) return ok(`${matches.length}\n`);
     return ok(matches.join("\n") + "\n");
   }
 
