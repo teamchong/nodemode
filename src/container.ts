@@ -11,8 +11,6 @@
 
 export type ContainerStatus = "stopped" | "starting" | "running" | "sleeping" | "crashed";
 
-export interface ContainerExecResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-}
+// ContainerExecResult is structurally identical to SpawnResult —
+// re-exported as an alias for clarity in container-specific contexts
+export type { SpawnResult as ContainerExecResult } from "./process-manager";
