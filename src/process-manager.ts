@@ -326,6 +326,7 @@ export class ProcessManager {
       return ok(options.stdin);
     }
     const outputs: string[] = [];
+    const errors: string[] = [];
     for (const arg of files) {
       if (arg === "-" && options?.stdin) {
         outputs.push(options.stdin);
@@ -334,11 +335,16 @@ export class ProcessManager {
       const path = resolvePath(cwd, arg);
       const content = await this.fs.readFileText(path);
       if (content === null) {
-        return fail(`cat: ${arg}: No such file or directory\n`);
+        errors.push(`cat: ${arg}: No such file or directory\n`);
+      } else {
+        outputs.push(content);
       }
-      outputs.push(content);
     }
-    return ok(outputs.join(""));
+    return {
+      exitCode: errors.length > 0 ? 1 : 0,
+      stdout: outputs.join(""),
+      stderr: errors.join(""),
+    };
   }
 
   private builtinLs(args: string[], cwd: string): SpawnResult {
@@ -474,7 +480,8 @@ export class ProcessManager {
     } else if (options?.stdin) {
       content = options.stdin;
     } else {
-      return fail("grep: usage: grep PATTERN [FILE]\n");
+      // No file and no stdin — no matches (like grep on empty stdin)
+      return { exitCode: 1, stdout: "", stderr: "" };
     }
 
     let test: (line: string) => boolean;

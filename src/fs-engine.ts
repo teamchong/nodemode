@@ -97,6 +97,13 @@ export class FsEngine {
   ): Promise<void> {
     const normalized = normalizePath(path);
     validatePath(normalized);
+
+    // Cannot write to a directory path
+    const existing = this.stat(normalized);
+    if (existing?.isDirectory) {
+      throw new Error(`EISDIR: illegal operation on a directory '${path}'`);
+    }
+
     const key = this.r2Key(normalized);
     const bytes =
       typeof data === "string" ? new TextEncoder().encode(data) : data;
@@ -215,6 +222,12 @@ export class FsEngine {
   mkdir(path: string, recursive: boolean = false): void {
     const normalized = normalizePath(path);
     validatePath(normalized);
+
+    // Check if a file (not directory) already exists at this path
+    const existing = this.stat(normalized);
+    if (existing && !existing.isDirectory) {
+      throw new Error(`EEXIST: file already exists '${path}'`);
+    }
 
     if (recursive) {
       this.ensureParentDirs(normalized);
