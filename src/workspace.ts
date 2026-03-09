@@ -513,25 +513,22 @@ export class Workspace extends DurableObject<Env> {
         if (!path) continue;
         r2Paths.add(path);
 
-        // Check if index entry is stale
+        // Upsert index entry (size may match but content could differ)
         const rows = this.sql
-          .exec("SELECT size, mode FROM files WHERE path = ?", path)
+          .exec("SELECT mode FROM files WHERE path = ?", path)
           .toArray();
-
-        if (rows.length === 0 || (rows[0].size as number) !== obj.size) {
-          const mode = rows.length > 0 ? (rows[0].mode as number) : 0o644;
-          this.sql.exec(
-            `INSERT OR REPLACE INTO files (path, r2_key, size, mode, mtime, is_dir)
-             VALUES (?, ?, ?, ?, ?, 0)`,
-            path,
-            obj.key,
-            obj.size,
-            mode,
-            Date.now(),
-          );
-          // Invalidate stale cache
-          this.sql.exec("DELETE FROM file_cache WHERE path = ?", path);
-        }
+        const mode = rows.length > 0 ? (rows[0].mode as number) : 0o644;
+        this.sql.exec(
+          `INSERT OR REPLACE INTO files (path, r2_key, size, mode, mtime, is_dir)
+           VALUES (?, ?, ?, ?, ?, 0)`,
+          path,
+          obj.key,
+          obj.size,
+          mode,
+          Date.now(),
+        );
+        // Always invalidate cache — content may have changed
+        this.sql.exec("DELETE FROM file_cache WHERE path = ?", path);
       }
 
       cursor = listed.truncated ? listed.cursor : undefined;
@@ -597,45 +594,29 @@ export class Workspace extends DurableObject<Env> {
       }
 
       // Buffer output for hibernation persistence
-      if (result.stdout) {
-        this.sql.exec(
-          "INSERT INTO terminal_buffer (stream, data, timestamp) VALUES ('stdout', ?, ?)",
-          result.stdout,
-          Date.now(),
-        );
+      const now = Date.now();
+      for (const [stream, data] of [["stdout", result.stdout], ["stderr", result.stderr]] as const) {
+        if (data) {
+          this.sql.exec(
+            "INSERT INTO terminal_buffer (stream, data, timestamp) VALUES (?, ?, ?)",
+            stream, data, now,
+          );
+        }
       }
-      if (result.stderr) {
-        this.sql.exec(
-          "INSERT INTO terminal_buffer (stream, data, timestamp) VALUES ('stderr', ?, ?)",
-          result.stderr,
-          Date.now(),
-        );
-      }
-
-      // Trim terminal buffer if it exceeds max rows
       this.trimTerminalBuffer();
 
-      ws.send(
-        JSON.stringify({
-          type: "result",
-          exitCode: result.exitCode,
-          stdout: result.stdout,
-          stderr: result.stderr,
-        }),
-      );
+      ws.send(JSON.stringify({
+        type: "result",
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      }));
 
       // Broadcast to other connected clients
       for (const other of this.ctx.getWebSockets()) {
         if (other !== ws) {
-          if (result.stdout) {
-            other.send(
-              JSON.stringify({ stream: "stdout", data: result.stdout }),
-            );
-          }
-          if (result.stderr) {
-            other.send(
-              JSON.stringify({ stream: "stderr", data: result.stderr }),
-            );
+          for (const [stream, data] of [["stdout", result.stdout], ["stderr", result.stderr]] as const) {
+            if (data) other.send(JSON.stringify({ stream, data }));
           }
         }
       }

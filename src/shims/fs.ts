@@ -85,7 +85,7 @@ export function rename(oldPath: string, newPath: string, cb: Callback<void>): vo
 export function copyFile(src: string, dest: string, flagsOrCb?: number | Callback<void>, cb?: Callback<void>): void {
   const callback = typeof flagsOrCb === "function" ? flagsOrCb : cb!;
   getFs().readFile(String(src)).then((data) => {
-    if (!data) return callback(new Error(`ENOENT: no such file or directory, open '${src}'`));
+    if (!data) throw new Error(`ENOENT: no such file or directory, open '${src}'`);
     return getFs().writeFile(String(dest), data);
   }).then(() => callback(null)).catch(callback);
 }

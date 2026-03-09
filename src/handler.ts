@@ -63,6 +63,8 @@ function jsonError(message: string, status: number): Response {
 export function createHandler(options: HandlerOptions = {}) {
   const { fallback, cors = true } = options;
 
+  const maybeCors = cors ? withCors : (r: Response) => r;
+
   return async (request: Request, env: Env): Promise<Response> => {
     const url = new URL(request.url);
 
@@ -86,8 +88,7 @@ export function createHandler(options: HandlerOptions = {}) {
         const target = new URL(`/${action}`, request.url);
         target.search = url.search;
         const forwarded = new Request(target, request);
-        const response = await workspace.fetch(forwarded);
-        return cors ? withCors(response) : response;
+        return maybeCors(await workspace.fetch(forwarded));
       }
 
       // API routes: /api/workspaces/{id?}/{action?}
@@ -106,10 +107,9 @@ export function createHandler(options: HandlerOptions = {}) {
             }
             cursor = listed.truncated ? listed.cursor : undefined;
           } while (cursor);
-          const response = new Response(JSON.stringify({ workspaces: allPrefixes }), {
+          return maybeCors(new Response(JSON.stringify({ workspaces: allPrefixes }), {
             headers: { "Content-Type": "application/json" },
-          });
-          return cors ? withCors(response) : response;
+          }));
         }
 
         // Forward to workspace DO
@@ -119,8 +119,7 @@ export function createHandler(options: HandlerOptions = {}) {
           new URL(`/${action || ""}`, request.url),
           request,
         );
-        const response = await workspace.fetch(forwarded);
-        return cors ? withCors(response) : response;
+        return maybeCors(await workspace.fetch(forwarded));
       }
 
       // Fallback
@@ -133,12 +132,10 @@ export function createHandler(options: HandlerOptions = {}) {
       });
     } catch (err) {
       if (err instanceof ValidationError) {
-        const resp = jsonError(err.message, 400);
-        return cors ? withCors(resp) : resp;
+        return maybeCors(jsonError(err.message, 400));
       }
       const msg = err instanceof Error ? err.message : String(err);
-      const resp = jsonError(msg, 500);
-      return cors ? withCors(resp) : resp;
+      return maybeCors(jsonError(msg, 500));
     }
   };
 }
