@@ -290,6 +290,8 @@ export class FsEngine {
   stat(path: string): FileStat | null {
     const normalized = normalizePath(path);
     validatePath(normalized);
+    // Root directory always exists
+    if (!normalized) return { size: 0, mode: 0o755, mtime: 0, isDirectory: true };
     const rows = this.sql
       .exec(
         "SELECT size, mode, mtime, is_dir FROM files WHERE path = ?",
@@ -310,6 +312,7 @@ export class FsEngine {
   exists(path: string): boolean {
     const normalized = normalizePath(path);
     validatePath(normalized);
+    if (!normalized) return true; // Root always exists
     const rows = this.sql
       .exec("SELECT 1 FROM files WHERE path = ? LIMIT 1", normalized)
       .toArray();
