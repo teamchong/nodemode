@@ -410,6 +410,7 @@ export class ProcessManager {
     } else {
       return ok("");
     }
+    if (!content) return ok("");
     const allLines = content.endsWith("\n")
       ? content.slice(0, -1).split("\n")
       : content.split("\n");
@@ -434,7 +435,7 @@ export class ProcessManager {
     } else {
       return ok("0 0 0\n");
     }
-    const lineCount = content.split("\n").length - (content.endsWith("\n") ? 1 : 0);
+    const lineCount = content === "" ? 0 : content.split("\n").length - (content.endsWith("\n") ? 1 : 0);
     const wordCount = content.split(/\s+/).filter(Boolean).length;
     const byteCount = new TextEncoder().encode(content).byteLength;
     const suffix = label ? ` ${label}` : "";
