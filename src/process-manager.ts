@@ -600,22 +600,28 @@ export class ProcessManager {
     if (args.length === 0) return testFail;
 
     let pass = false;
-    switch (args[0]) {
-      case "-f":
-      case "-d": {
-        const stat = args[1] ? this.fs.stat(resolvePath(cwd, args[1])) : null;
-        pass = args[0] === "-f" ? !!stat && !stat.isDirectory : !!stat?.isDirectory;
-        break;
+
+    // Binary operators: test A = B, test A != B
+    if (args.length >= 3 && (args[1] === "=" || args[1] === "!=")) {
+      pass = args[1] === "=" ? args[0] === args[2] : args[0] !== args[2];
+    } else {
+      switch (args[0]) {
+        case "-f":
+        case "-d": {
+          const stat = args[1] ? this.fs.stat(resolvePath(cwd, args[1])) : null;
+          pass = args[0] === "-f" ? !!stat && !stat.isDirectory : !!stat?.isDirectory;
+          break;
+        }
+        case "-e":
+          pass = !!args[1] && this.fs.exists(resolvePath(cwd, args[1]));
+          break;
+        case "-z":
+          pass = !args[1];
+          break;
+        case "-n":
+          pass = !!args[1];
+          break;
       }
-      case "-e":
-        pass = !!args[1] && this.fs.exists(resolvePath(cwd, args[1]));
-        break;
-      case "-z":
-        pass = !args[1];
-        break;
-      case "-n":
-        pass = !!args[1];
-        break;
     }
     return pass ? ok("") : testFail;
   }
