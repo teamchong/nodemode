@@ -231,6 +231,15 @@ export class FsEngine {
 
     if (recursive) {
       this.ensureParentDirs(normalized);
+    } else {
+      // Without -p, parent must exist
+      const parts = normalized.split("/");
+      if (parts.length > 1) {
+        const parent = parts.slice(0, -1).join("/");
+        if (!this.exists(parent)) {
+          throw new Error(`ENOENT: no such file or directory '${path}'`);
+        }
+      }
     }
 
     const now = Date.now();

@@ -246,9 +246,7 @@ export class Workspace extends DurableObject<Env> {
   }
 
   private handleFsStat(request: Request): Response {
-    const url = new URL(request.url);
-    const path = url.searchParams.get("path") || "/";
-    validatePath(path);
+    const path = getPathParam(request);
     const stat = this.fs.stat(path);
     if (!stat) {
       return json({ error: `ENOENT: no such file '${path}'` }, 404);
@@ -257,9 +255,7 @@ export class Workspace extends DurableObject<Env> {
   }
 
   private handleFsReaddir(request: Request): Response {
-    const url = new URL(request.url);
-    const path = url.searchParams.get("path") || "/";
-    validatePath(path);
+    const path = getPathParam(request);
     const entries = this.fs.readdir(path);
     return json(entries);
   }
@@ -293,9 +289,7 @@ export class Workspace extends DurableObject<Env> {
   }
 
   private handleFsExists(request: Request): Response {
-    const url = new URL(request.url);
-    const path = url.searchParams.get("path") || "/";
-    validatePath(path);
+    const path = getPathParam(request);
     return json({ exists: this.fs.exists(path) });
   }
 
@@ -624,6 +618,12 @@ export class Workspace extends DurableObject<Env> {
       );
     }
   }
+}
+
+function getPathParam(request: Request): string {
+  const path = new URL(request.url).searchParams.get("path") || "/";
+  validatePath(path);
+  return path;
 }
 
 function json(data: unknown, status: number = 200): Response {

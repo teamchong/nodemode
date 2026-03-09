@@ -693,28 +693,32 @@ function splitChain(command: string): ChainSegment[] {
 }
 
 function parseCommand(command: string): { cmd: string; args: string[] } {
-  // Simple shell-like parsing (handles quotes)
+  // Simple shell-like parsing (handles quotes, preserves empty quoted strings)
   const tokens: string[] = [];
   let current = "";
   let inSingle = false;
   let inDouble = false;
+  let hasQuote = false;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i];
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
+      hasQuote = true;
     } else if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
+      hasQuote = true;
     } else if (ch === " " && !inSingle && !inDouble) {
-      if (current) {
+      if (current || hasQuote) {
         tokens.push(current);
         current = "";
+        hasQuote = false;
       }
     } else {
       current += ch;
     }
   }
-  if (current) tokens.push(current);
+  if (current || hasQuote) tokens.push(current);
 
   return { cmd: tokens[0] || "", args: tokens.slice(1) };
 }
