@@ -83,62 +83,8 @@ export class ProcessManager {
 
   async exec(command: string, options: SpawnOptions = {}): Promise<SpawnResult> {
     validateCommand(command);
-    // Shell precedence: split chains (&&, ||, ;) first, then pipes within each segment.
-    return this.execChain(splitChain(command), options);
-  }
 
-  private async execPipeline(commands: string[], options: SpawnOptions): Promise<SpawnResult> {
-    let input = "";
-    let lastResult: SpawnResult = { exitCode: 0, stdout: "", stderr: "" };
-
-    for (const cmd of commands) {
-      const trimmed = cmd.trim();
-      if (!trimmed) continue;
-      // Feed previous stdout as stdin to next command (via grep/head/etc that read from stdin)
-      // For builtins, we pass the input as a virtual file "-"
-      lastResult = await this.execSingle(trimmed, { ...options, stdin: input });
-      input = lastResult.stdout;
-      if (lastResult.exitCode !== 0) break;
-    }
-
-    return lastResult;
-  }
-
-  private async execChain(segments: ChainSegment[], options: SpawnOptions): Promise<SpawnResult> {
-    let lastResult: SpawnResult = { exitCode: 0, stdout: "", stderr: "" };
-    const allStdout: string[] = [];
-    const allStderr: string[] = [];
-
-    for (const { command, operator } of segments) {
-      const trimmed = command.trim();
-      if (!trimmed) continue;
-
-      // Check operator condition
-      if (operator === "&&" && lastResult.exitCode !== 0) continue;
-      if (operator === "||" && lastResult.exitCode === 0) continue;
-
-      // Each chain segment may contain pipes, so route through full exec
-      // (which handles pipes before falling through to execSingle)
-      const pipeline = splitPipeline(trimmed);
-      lastResult = pipeline.length > 1
-        ? await this.execPipeline(pipeline, options)
-        : await this.execSingle(trimmed, options);
-      if (lastResult.stdout) allStdout.push(lastResult.stdout);
-      if (lastResult.stderr) allStderr.push(lastResult.stderr);
-    }
-
-    return {
-      exitCode: lastResult.exitCode,
-      stdout: allStdout.join(""),
-      stderr: allStderr.join(""),
-    };
-  }
-
-  private async execSingle(command: string, options: SpawnOptions): Promise<SpawnResult> {
-    const { cmd, args } = parseCommand(command);
-    const effectiveCwd = options.cwd || this.cwd;
-
-    // Record in process table
+    // Record top-level command in process table
     this.sql.exec(
       "INSERT INTO processes (command, status, created_at) VALUES (?, 'running', ?)",
       command,
@@ -150,22 +96,7 @@ export class ProcessManager {
 
     let result: SpawnResult;
     try {
-      if (BUILTIN_COMMANDS.has(cmd)) {
-        result = await this.execBuiltin(cmd, args, effectiveCwd, options);
-      } else if (this.containerExec) {
-        result = await this.containerExec(command, {
-          cwd: effectiveCwd,
-          env: options.env,
-        });
-      } else {
-        result = {
-          exitCode: 127,
-          stdout: "",
-          stderr: `nodemode: command not found: ${cmd}\nNo container available. Built-in commands: ${[...BUILTIN_COMMANDS].join(", ")}`,
-        };
-      }
-
-      // Record result (truncate stored output to save SQLite space)
+      result = await this.execChain(splitChain(command), options);
       this.sql.exec(
         "UPDATE processes SET status = 'done', exit_code = ?, stdout = ?, stderr = ?, finished_at = ? WHERE pid = ?",
         result.exitCode,
@@ -187,6 +118,69 @@ export class ProcessManager {
       if (++this.execCount % PRUNE_INTERVAL === 0) this.pruneProcessTable();
     }
     return result;
+  }
+
+  private async execPipeline(commands: string[], options: SpawnOptions): Promise<SpawnResult> {
+    let input = "";
+    let lastResult: SpawnResult = { exitCode: 0, stdout: "", stderr: "" };
+    const allStderr: string[] = [];
+
+    for (const cmd of commands) {
+      const trimmed = cmd.trim();
+      if (!trimmed) continue;
+      lastResult = await this.execSingle(trimmed, { ...options, stdin: input });
+      input = lastResult.stdout;
+      if (lastResult.stderr) allStderr.push(lastResult.stderr);
+      if (lastResult.exitCode !== 0) break;
+    }
+
+    return { exitCode: lastResult.exitCode, stdout: lastResult.stdout, stderr: allStderr.join("") };
+  }
+
+  private async execChain(segments: ChainSegment[], options: SpawnOptions): Promise<SpawnResult> {
+    let lastResult: SpawnResult = { exitCode: 0, stdout: "", stderr: "" };
+    const allStdout: string[] = [];
+    const allStderr: string[] = [];
+
+    for (const { command, operator } of segments) {
+      const trimmed = command.trim();
+      if (!trimmed) continue;
+
+      if (operator === "&&" && lastResult.exitCode !== 0) continue;
+      if (operator === "||" && lastResult.exitCode === 0) continue;
+
+      const pipeline = splitPipeline(trimmed);
+      lastResult = pipeline.length > 1
+        ? await this.execPipeline(pipeline, options)
+        : await this.execSingle(trimmed, options);
+      if (lastResult.stdout) allStdout.push(lastResult.stdout);
+      if (lastResult.stderr) allStderr.push(lastResult.stderr);
+    }
+
+    return {
+      exitCode: lastResult.exitCode,
+      stdout: allStdout.join(""),
+      stderr: allStderr.join(""),
+    };
+  }
+
+  private async execSingle(command: string, options: SpawnOptions): Promise<SpawnResult> {
+    const { cmd, args } = parseCommand(command);
+    const effectiveCwd = options.cwd || this.cwd;
+
+    if (BUILTIN_COMMANDS.has(cmd)) {
+      return this.execBuiltin(cmd, args, effectiveCwd, options);
+    } else if (this.containerExec) {
+      return this.containerExec(command, {
+        cwd: effectiveCwd,
+        env: options.env,
+      });
+    }
+    return {
+      exitCode: 127,
+      stdout: "",
+      stderr: `nodemode: command not found: ${cmd}\nNo container available. Built-in commands: ${[...BUILTIN_COMMANDS].join(", ")}`,
+    };
   }
 
   private pruneProcessTable(): void {
