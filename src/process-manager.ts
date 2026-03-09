@@ -595,10 +595,14 @@ export class ProcessManager {
 
     let pass = false;
 
-    // Binary operators: test A = B, test A != B
-    if (a.length >= 3 && (a[1] === "=" || a[1] === "!=")) {
+    if (a.length === 1) {
+      // Single arg: test STRING → true if non-empty
+      pass = a[0] !== "";
+    } else if (a.length >= 3 && (a[1] === "=" || a[1] === "!=")) {
+      // Binary operators: test A = B, test A != B
       pass = a[1] === "=" ? a[0] === a[2] : a[0] !== a[2];
     } else {
+      // Unary operators
       switch (a[0]) {
         case "-f":
         case "-d": {

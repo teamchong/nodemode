@@ -79,8 +79,8 @@ export function exec(command: string, optionsOrCb?: ExecOptions | ExecCallback, 
       }
     }
 
-    cp.emit("close", result.exitCode);
     cp.emit("exit", result.exitCode);
+    cp.emit("close", result.exitCode);
   }).catch((err) => {
     if (callback) callback(err as Error, "", "");
     cp.emit("error", err);
@@ -111,8 +111,8 @@ export function spawn(command: string, args?: string[], options?: ExecOptions): 
     if (result.stderr) cp.stderr.emit("data", result.stderr);
     cp.stdout.emit("end");
     cp.stderr.emit("end");
-    cp.emit("close", result.exitCode);
     cp.emit("exit", result.exitCode);
+    cp.emit("close", result.exitCode);
   }).catch((err) => {
     cp.emit("error", err);
   });
