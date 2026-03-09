@@ -536,36 +536,34 @@ export class ProcessManager {
     return ok("");
   }
 
-  private async builtinCp(args: string[], cwd: string): Promise<SpawnResult> {
+  private resolveSrcDst(cmd: string, args: string[], cwd: string): { src: string; dst: string } | SpawnResult {
     const files = args.filter((a) => !a.startsWith("-"));
-    if (files.length < 2) return fail("cp: missing operand\n");
+    if (files.length < 2) return fail(`${cmd}: missing operand\n`);
     const src = resolvePath(cwd, files[0]);
     let dst = resolvePath(cwd, files[1]);
-    // If dst is an existing directory, copy into it
     const dstStat = this.fs.stat(dst);
     if (dstStat?.isDirectory) {
       const basename = src.split("/").pop() || src;
       dst = dst ? `${dst}/${basename}` : basename;
     }
+    return { src, dst };
+  }
+
+  private async builtinCp(args: string[], cwd: string): Promise<SpawnResult> {
+    const resolved = this.resolveSrcDst("cp", args, cwd);
+    if ("exitCode" in resolved) return resolved;
+    const { src, dst } = resolved;
     const data = await this.fs.readFile(src);
-    if (data === null) return fail(`cp: ${files[0]}: No such file or directory\n`);
+    if (data === null) return fail(`cp: ${args.filter((a) => !a.startsWith("-"))[0]}: No such file or directory\n`);
     const stat = this.fs.stat(src);
     await this.fs.writeFile(dst, data, stat?.mode);
     return ok("");
   }
 
   private async builtinMv(args: string[], cwd: string): Promise<SpawnResult> {
-    const files = args.filter((a) => !a.startsWith("-"));
-    if (files.length < 2) return fail("mv: missing operand\n");
-    const src = resolvePath(cwd, files[0]);
-    let dst = resolvePath(cwd, files[1]);
-    // If dst is an existing directory, move into it
-    const dstStat = this.fs.stat(dst);
-    if (dstStat?.isDirectory) {
-      const basename = src.split("/").pop() || src;
-      dst = dst ? `${dst}/${basename}` : basename;
-    }
-    await this.fs.rename(src, dst);
+    const resolved = this.resolveSrcDst("mv", args, cwd);
+    if ("exitCode" in resolved) return resolved;
+    await this.fs.rename(resolved.src, resolved.dst);
     return ok("");
   }
 
