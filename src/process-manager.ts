@@ -351,13 +351,7 @@ export class ProcessManager {
     // If target is a file (not a directory), list just that file
     const targetStat = paths[0] ? this.fs.stat(dir) : null;
     if (targetStat && !targetStat.isDirectory) {
-      const name = paths[0];
-      if (longFormat) {
-        const perms = formatMode(targetStat.mode);
-        const mtime = new Date(targetStat.mtime).toISOString().slice(0, 16);
-        return ok(`-${perms}  1 nodemode nodemode  ${String(targetStat.size).padStart(8)} ${mtime} ${name}\n`);
-      }
-      return ok(name + "\n");
+      return ok(longFormat ? lsLine("-", targetStat, paths[0]) + "\n" : paths[0] + "\n");
     }
 
     const entries = this.fs.readdir(dir);
@@ -371,11 +365,7 @@ export class ProcessManager {
     if (longFormat) {
       const lines = filtered.map((e) => {
         const stat = this.fs.stat(resolvePath(dir, e.name));
-        const type = e.isDirectory ? "d" : "-";
-        const size = stat?.size ?? 0;
-        const perms = formatMode(stat?.mode ?? 0o644);
-        const mtime = stat?.mtime ? new Date(stat.mtime).toISOString().slice(0, 16) : "1970-01-01T00:00";
-        return `${type}${perms}  1 nodemode nodemode  ${String(size).padStart(8)} ${mtime} ${e.name}`;
+        return lsLine(e.isDirectory ? "d" : "-", stat, e.name);
       });
       return ok(lines.join("\n") + "\n");
     }
@@ -727,6 +717,13 @@ function parseCommand(command: string): { cmd: string; args: string[] } {
   if (current) tokens.push(current);
 
   return { cmd: tokens[0] || "", args: tokens.slice(1) };
+}
+
+function lsLine(type: string, stat: { size: number; mode: number; mtime: number } | null, name: string): string {
+  const perms = formatMode(stat?.mode ?? 0o644);
+  const size = stat?.size ?? 0;
+  const mtime = stat?.mtime ? new Date(stat.mtime).toISOString().slice(0, 16) : "1970-01-01T00:00";
+  return `${type}${perms}  1 nodemode nodemode  ${String(size).padStart(8)} ${mtime} ${name}`;
 }
 
 function formatMode(mode: number): string {
