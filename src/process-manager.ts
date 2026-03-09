@@ -247,7 +247,7 @@ export class ProcessManager {
       case "true":
         return ok("");
       case "false":
-        return { exitCode: 1, stdout: "", stderr: "" };
+        return fail("");
       case "pwd":
         return ok(cwd + "\n");
       case "date":
@@ -462,8 +462,7 @@ export class ProcessManager {
     } else if (options?.stdin) {
       content = options.stdin;
     } else {
-      // No file and no stdin — no matches (like grep on empty stdin)
-      return { exitCode: 1, stdout: "", stderr: "" };
+      return fail(""); // No file and no stdin — no matches
     }
 
     let test: (line: string) => boolean;
@@ -477,7 +476,7 @@ export class ProcessManager {
     }
     const lines = content.endsWith("\n") ? content.slice(0, -1).split("\n") : content.split("\n");
     const matches = lines.filter((line) => invert ? !test(line) : test(line));
-    if (matches.length === 0) return { exitCode: 1, stdout: "", stderr: "" };
+    if (matches.length === 0) return fail("");
     if (countOnly) return ok(`${matches.length}\n`);
     return ok(matches.join("\n") + "\n");
   }
@@ -585,13 +584,12 @@ export class ProcessManager {
   }
 
   private builtinTest(args: string[], cwd: string): SpawnResult {
-    const testFail: SpawnResult = { exitCode: 1, stdout: "", stderr: "" };
-    if (args.length === 0) return testFail;
+    if (args.length === 0) return fail("");
 
     // Handle ! negation
     const negate = args[0] === "!";
     const a = negate ? args.slice(1) : args;
-    if (a.length === 0) return negate ? ok("") : testFail;
+    if (a.length === 0) return negate ? ok("") : fail("");
 
     let pass = false;
 
@@ -622,7 +620,7 @@ export class ProcessManager {
       }
     }
     if (negate) pass = !pass;
-    return pass ? ok("") : testFail;
+    return pass ? ok("") : fail("");
   }
 }
 

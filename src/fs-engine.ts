@@ -376,58 +376,38 @@ export class FsEngine {
 
     this.ensureParentDirs(newNorm);
 
-    if (stat.isDirectory) {
-      // Rename directory: update all children paths
-      const children = this.sql
-        .exec("SELECT path, r2_key FROM files WHERE path = ? OR path LIKE ? || '/%'", oldNorm, oldNorm)
-        .toArray();
+    // Move all entries (works for both single files and directories)
+    const children = this.sql
+      .exec("SELECT path, r2_key FROM files WHERE path = ? OR path LIKE ? || '/%'", oldNorm, oldNorm)
+      .toArray();
 
-      for (const child of children) {
-        const childPath = child.path as string;
-        const childR2Key = child.r2_key as string;
-        const newChildPath = newNorm + childPath.slice(oldNorm.length);
-        const newChildR2Key = childR2Key
-          ? this.r2Key(newChildPath)
-          : "";
+    for (const child of children) {
+      const childPath = child.path as string;
+      const childR2Key = child.r2_key as string;
+      const newChildPath = newNorm + childPath.slice(oldNorm.length);
+      const newChildR2Key = childR2Key ? this.r2Key(newChildPath) : "";
 
-        if (childR2Key) {
-          const obj = await this.bucket.get(childR2Key);
-          if (obj) {
-            await this.bucket.put(newChildR2Key, obj.body);
-            await this.bucket.delete(childR2Key);
-          }
+      if (childR2Key) {
+        const obj = await this.bucket.get(childR2Key);
+        if (obj) {
+          await this.bucket.put(newChildR2Key, obj.body);
+          await this.bucket.delete(childR2Key);
         }
-
-        this.sql.exec(
-          "UPDATE files SET path = ?, r2_key = ? WHERE path = ?",
-          newChildPath,
-          newChildR2Key,
-          childPath,
-        );
       }
 
       this.sql.exec(
-        "DELETE FROM file_cache WHERE path = ? OR path LIKE ? || '/%'",
-        oldNorm,
-        oldNorm,
-      );
-    } else {
-      // Rename single file
-      const oldKey = this.r2Key(oldNorm);
-      const obj = await this.bucket.get(oldKey);
-      if (!obj) throw new Error(`ENOENT: no such file '${oldPath}'`);
-      const newKey = this.r2Key(newNorm);
-      await this.bucket.put(newKey, obj.body);
-      await this.bucket.delete(oldKey);
-
-      this.sql.exec(
         "UPDATE files SET path = ?, r2_key = ? WHERE path = ?",
-        newNorm,
-        newKey,
-        oldNorm,
+        newChildPath,
+        newChildR2Key,
+        childPath,
       );
-      this.sql.exec("DELETE FROM file_cache WHERE path = ?", oldNorm);
     }
+
+    this.sql.exec(
+      "DELETE FROM file_cache WHERE path = ? OR path LIKE ? || '/%'",
+      oldNorm,
+      oldNorm,
+    );
   }
 
   // -- Internal helpers --
