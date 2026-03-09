@@ -174,12 +174,14 @@ export class FsEngine {
     const normalized = normalizePath(path);
     validatePath(normalized);
 
+    const escaped = escapeLike(normalized);
+
     if (recursive) {
       // Delete all children from R2 in batches of 1000
       const children = this.sql
         .exec(
-          "SELECT r2_key FROM files WHERE path LIKE ? || '/%'",
-          normalized,
+          "SELECT r2_key FROM files WHERE path LIKE ? ESCAPE '\\'",
+          escaped + "/%",
         )
         .toArray();
 
@@ -192,22 +194,22 @@ export class FsEngine {
 
       // Delete from index
       this.sql.exec(
-        "DELETE FROM files WHERE path = ? OR path LIKE ? || '/%'",
+        "DELETE FROM files WHERE path = ? OR path LIKE ? ESCAPE '\\'",
         normalized,
-        normalized,
+        escaped + "/%",
       );
       this.sql.exec(
-        "DELETE FROM file_cache WHERE path = ? OR path LIKE ? || '/%'",
+        "DELETE FROM file_cache WHERE path = ? OR path LIKE ? ESCAPE '\\'",
         normalized,
-        normalized,
+        escaped + "/%",
       );
     } else {
       // Check if empty — only look at direct children
       const children = this.sql
         .exec(
-          "SELECT COUNT(*) as cnt FROM files WHERE path LIKE ? || '/%' AND path NOT LIKE ? || '/%/%'",
-          normalized,
-          normalized,
+          "SELECT COUNT(*) as cnt FROM files WHERE path LIKE ? ESCAPE '\\' AND path NOT LIKE ? ESCAPE '\\'",
+          escaped + "/%",
+          escaped + "/%/%",
         )
         .toArray();
       if ((children[0].cnt as number) > 0) {
@@ -261,12 +263,13 @@ export class FsEngine {
     // We still need to detect implicit directories (entries deeper than
     // one level imply a directory at level 1), so we query one level
     // and also check for deeper entries.
+    const escaped = escapeLike(prefix);
     const directRows = this.sql
       .exec(
         `SELECT path, is_dir FROM files
-         WHERE path LIKE ? AND path NOT LIKE ?`,
-        prefix + "%",
-        prefix + "%/%" ,
+         WHERE path LIKE ? ESCAPE '\\' AND path NOT LIKE ? ESCAPE '\\'`,
+        escaped + "%",
+        escaped + "%/%",
       )
       .toArray();
 
@@ -286,11 +289,11 @@ export class FsEngine {
       .exec(
         `SELECT DISTINCT SUBSTR(path, ?, INSTR(SUBSTR(path, ?), '/') - 1) as child_name
          FROM files
-         WHERE path LIKE ? AND path LIKE ?`,
+         WHERE path LIKE ? ESCAPE '\\' AND path LIKE ? ESCAPE '\\'`,
         prefix.length + 1,
         prefix.length + 1,
-        prefix + "%",
-        prefix + "%/%",
+        escaped + "%",
+        escaped + "%/%",
       )
       .toArray();
 
@@ -377,8 +380,13 @@ export class FsEngine {
     this.ensureParentDirs(newNorm);
 
     // Move all entries (works for both single files and directories)
+    const escapedOld = escapeLike(oldNorm);
     const children = this.sql
-      .exec("SELECT path, r2_key FROM files WHERE path = ? OR path LIKE ? || '/%'", oldNorm, oldNorm)
+      .exec(
+        "SELECT path, r2_key FROM files WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+        oldNorm,
+        escapedOld + "/%",
+      )
       .toArray();
 
     for (const child of children) {
@@ -404,9 +412,9 @@ export class FsEngine {
     }
 
     this.sql.exec(
-      "DELETE FROM file_cache WHERE path = ? OR path LIKE ? || '/%'",
+      "DELETE FROM file_cache WHERE path = ? OR path LIKE ? ESCAPE '\\'",
       oldNorm,
-      oldNorm,
+      escapedOld + "/%",
     );
   }
 
@@ -448,7 +456,7 @@ export class FsEngine {
   }
 }
 
-function normalizePath(path: string): string {
+export function normalizePath(path: string): string {
   const parts = path.split("/");
   const resolved: string[] = [];
   for (const part of parts) {
@@ -457,4 +465,10 @@ function normalizePath(path: string): string {
     else { resolved.push(part); }
   }
   return resolved.join("/");
+}
+
+// Escape LIKE pattern metacharacters so they match literally.
+// Must be paired with ESCAPE '\\' in SQL (which is ESCAPE '\' in SQLite).
+function escapeLike(s: string): string {
+  return s.replace(/[%_\\]/g, "\\$&");
 }

@@ -624,4 +624,78 @@ describe("nodemode", () => {
     expect(result.stdout).toContain("FOO=bar");
     expect(result.stdout).toContain("NODE_ENV=test");
   });
+
+  // -- Backslash escape tests --
+
+  it("backslash escapes space in arguments", async () => {
+    const result = await exec("echo hello\\ world");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("hello world\n");
+  });
+
+  it("backslash escapes pipe operator", async () => {
+    const result = await exec("echo hello\\|world");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("hello|world\n");
+  });
+
+  it("double backslash produces literal backslash", async () => {
+    const result = await exec("echo hello\\\\world");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("hello\\world\n");
+  });
+
+  it("backslash in double quotes only escapes special chars", async () => {
+    const result = await exec('echo "hello\\"world"');
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('hello"world\n');
+  });
+
+  it("backslash is literal inside single quotes", async () => {
+    const result = await exec("echo 'hello\\world'");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("hello\\world\n");
+  });
+
+  // -- LIKE-safe path tests --
+
+  it("handles paths with % character", async () => {
+    await writeFile("100%done.txt", "content");
+    expect(await exists("100%done.txt")).toBe(true);
+
+    const s = await stat("100%done.txt");
+    expect(s.size).toBeGreaterThan(0);
+
+    const entries = await readdir("/");
+    const names = entries.map((e) => e.name);
+    expect(names).toContain("100%done.txt");
+  });
+
+  it("handles paths with _ character", async () => {
+    await writeFile("my_file.txt", "underscore content");
+    expect(await exists("my_file.txt")).toBe(true);
+
+    const data = await readFile("my_file.txt");
+    expect(data.content).toBe("underscore content");
+  });
+
+  it("readdir with % in directory name is exact", async () => {
+    await mkdir("a%b");
+    await writeFile("a%b/file.txt", "in percent dir");
+    await mkdir("axb");
+    await writeFile("axb/other.txt", "in axb dir");
+
+    const entries = await readdir("a%b");
+    const names = entries.map((e) => e.name);
+    expect(names).toContain("file.txt");
+    expect(names).not.toContain("other.txt");
+  });
+
+  // -- wc respects flags with empty input --
+
+  it("wc -l with no input returns 0", async () => {
+    const result = await exec("true | wc -l");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("0");
+  });
 });

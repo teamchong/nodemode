@@ -18,7 +18,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
-import { FsEngine } from "./fs-engine";
+import { FsEngine, normalizePath } from "./fs-engine";
 import { ProcessManager } from "./process-manager";
 import type { ContainerStatus, ContainerExecResult } from "./container";
 import { validatePath, ValidationError } from "./validate";
@@ -59,6 +59,7 @@ export class Workspace extends DurableObject<Env> {
   }
 
   private initSchema(): void {
+    this.sql.exec("PRAGMA case_sensitive_like = ON");
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS files (
         path TEXT PRIMARY KEY,
@@ -414,9 +415,11 @@ export class Workspace extends DurableObject<Env> {
     }
 
     let refreshed = 0;
-    for (const path of body.paths) {
+    for (const rawPath of body.paths) {
       try {
-        validatePath(path);
+        validatePath(rawPath);
+        const path = normalizePath(rawPath);
+        if (!path) continue;
         const r2Key = `${this.workspaceId}/${path}`;
         const head = await this.env.FS_BUCKET.head(r2Key);
         if (head) {
@@ -431,12 +434,9 @@ export class Workspace extends DurableObject<Env> {
     }
 
     // Broadcast to WebSocket clients
+    const msg = JSON.stringify({ type: "index-updated", paths: body.paths, refreshed });
     for (const ws of this.ctx.getWebSockets()) {
-      ws.send(JSON.stringify({
-        type: "index-updated",
-        paths: body.paths,
-        refreshed,
-      }));
+      try { ws.send(msg); } catch { /* client disconnected */ }
     }
 
     return json({ refreshed });
@@ -521,9 +521,7 @@ export class Workspace extends DurableObject<Env> {
       .reverse(); // Reverse to send in chronological order
 
     for (const row of buffer) {
-      server.send(
-        JSON.stringify({ stream: row.stream, data: row.data }),
-      );
+      try { server.send(JSON.stringify({ stream: row.stream, data: row.data })); } catch { break; }
     }
 
     return new Response(null, { status: 101, webSocket: client });
@@ -566,10 +564,11 @@ export class Workspace extends DurableObject<Env> {
 
       // Broadcast to other connected clients
       for (const other of this.ctx.getWebSockets()) {
-        if (other !== ws) {
+        if (other === ws) continue;
+        try {
           if (result.stdout) other.send(JSON.stringify({ stream: "stdout", data: result.stdout }));
           if (result.stderr) other.send(JSON.stringify({ stream: "stderr", data: result.stderr }));
-        }
+        } catch { /* client disconnected */ }
       }
     }
   }

@@ -418,11 +418,12 @@ export class ProcessManager {
       if (fileContent === null) return fail(`wc: ${files[0]}: No such file or directory\n`);
       content = fileContent;
       label = files[0];
-    } else if (options?.stdin) {
+    } else if (options?.stdin != null) {
       content = options.stdin;
       label = "";
     } else {
-      return ok("0 0 0\n");
+      content = "";
+      label = "";
     }
     const lineCount = content.split("\n").length - 1; // wc counts newline chars
     const wordCount = content.split(/\s+/).filter(Boolean).length;
@@ -651,9 +652,17 @@ function splitPipeline(command: string): string[] {
     const ch = command[i];
     if (ch === "'" && !inDouble) { inSingle = !inSingle; current += ch; }
     else if (ch === '"' && !inSingle) { inDouble = !inDouble; current += ch; }
-    else if (ch === "|" && !inSingle && !inDouble && command[i + 1] !== "|" && (i === 0 || command[i - 1] !== "|")) {
-      parts.push(current);
-      current = "";
+    else if (ch === "\\" && !inSingle && i + 1 < command.length) {
+      current += ch + command[++i];
+    }
+    else if (ch === "|" && !inSingle && !inDouble) {
+      if (command[i + 1] === "|") {
+        // || operator — not a pipe, pass through (splitChain handles ||)
+        current += ch + command[++i];
+      } else {
+        parts.push(current);
+        current = "";
+      }
     } else {
       current += ch;
     }
@@ -679,6 +688,9 @@ function splitChain(command: string): ChainSegment[] {
     const ch = command[i];
     if (ch === "'" && !inDouble) { inSingle = !inSingle; current += ch; }
     else if (ch === '"' && !inSingle) { inDouble = !inDouble; current += ch; }
+    else if (ch === "\\" && !inSingle && i + 1 < command.length) {
+      current += ch + command[++i];
+    }
     else if (inSingle || inDouble) { current += ch; }
     else if (ch === "&" && command[i + 1] === "&") { flush("&&"); i++; }
     else if (ch === "|" && command[i + 1] === "|") { flush("||"); i++; }
@@ -690,7 +702,7 @@ function splitChain(command: string): ChainSegment[] {
 }
 
 function parseCommand(command: string): { cmd: string; args: string[] } {
-  // Simple shell-like parsing (handles quotes, preserves empty quoted strings)
+  // Shell-like parsing: handles quotes, backslash escapes, preserves empty quoted strings
   const tokens: string[] = [];
   let current = "";
   let inSingle = false;
@@ -705,6 +717,19 @@ function parseCommand(command: string): { cmd: string; args: string[] } {
     } else if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
       hasQuote = true;
+    } else if (ch === "\\" && !inSingle && i + 1 < command.length) {
+      const next = command[++i];
+      if (inDouble) {
+        // In double quotes: only \", \\, \$, \` are special
+        if (next === '"' || next === "\\" || next === "$" || next === "`") {
+          current += next;
+        } else {
+          current += "\\" + next;
+        }
+      } else {
+        // Outside quotes: backslash escapes any character
+        current += next;
+      }
     } else if (ch === " " && !inSingle && !inDouble) {
       if (current || hasQuote) {
         tokens.push(current);
