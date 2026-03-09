@@ -241,9 +241,11 @@ export class ProcessManager {
     options: SpawnOptions,
   ): Promise<SpawnResult> {
     switch (cmd) {
-      case "echo":
-        if (args[0] === "-n") return ok(args.slice(1).join(" "));
-        return ok(args.join(" ") + "\n");
+      case "echo": {
+        let i = 0;
+        while (args[i] === "-n") i++;
+        return ok(args.slice(i).join(" ") + (i > 0 ? "" : "\n"));
+      }
       case "true":
         return ok("");
       case "false":
@@ -312,7 +314,7 @@ export class ProcessManager {
   }
 
   private async builtinCat(args: string[], cwd: string, options?: SpawnOptions): Promise<SpawnResult> {
-    const files = args.filter((a) => !a.startsWith("-"));
+    const files = args.filter((a) => a === "-" || !a.startsWith("-"));
     // No files: pass through stdin (pipe support)
     if (files.length === 0 && options?.stdin) {
       return ok(options.stdin);
