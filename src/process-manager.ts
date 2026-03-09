@@ -353,8 +353,7 @@ export class ProcessManager {
     }
 
     const entries = this.fs.readdir(dir);
-    const normalized = dir.replace(/^\/+/, "").replace(/\/+$/, "");
-    if (entries.length === 0 && normalized && !this.fs.exists(dir)) {
+    if (entries.length === 0 && dir && dir !== "/" && !this.fs.exists(dir)) {
       return fail(`ls: cannot access '${dir}': No such file or directory\n`);
     }
 
@@ -423,7 +422,7 @@ export class ProcessManager {
     } else {
       return ok("0 0 0\n");
     }
-    const lineCount = content === "" ? 0 : content.split("\n").length - (content.endsWith("\n") ? 1 : 0);
+    const lineCount = content.split("\n").length - 1; // wc counts newline chars
     const wordCount = content.split(/\s+/).filter(Boolean).length;
     const byteCount = new TextEncoder().encode(content).byteLength;
     const suffix = label ? ` ${label}` : "";
