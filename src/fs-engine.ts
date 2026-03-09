@@ -335,8 +335,6 @@ export class FsEngine {
     const newNorm = normalizePath(newPath);
     validatePath(oldNorm);
     validatePath(newNorm);
-    const oldKey = this.r2Key(oldNorm);
-    const newKey = this.r2Key(newNorm);
 
     const stat = this.stat(oldNorm);
     if (!stat) throw new Error(`ENOENT: no such file '${oldPath}'`);
@@ -382,8 +380,10 @@ export class FsEngine {
       );
     } else {
       // Rename single file
+      const oldKey = this.r2Key(oldNorm);
       const obj = await this.bucket.get(oldKey);
       if (!obj) throw new Error(`ENOENT: no such file '${oldPath}'`);
+      const newKey = this.r2Key(newNorm);
       this.ensureParentDirs(newNorm);
       await this.bucket.put(newKey, obj.body);
       await this.bucket.delete(oldKey);

@@ -262,6 +262,7 @@ export class ProcessManager {
   ): Promise<SpawnResult> {
     switch (cmd) {
       case "echo":
+        if (args[0] === "-n") return ok(args.slice(1).join(" "));
         return ok(args.join(" ") + "\n");
       case "true":
         return ok("");
