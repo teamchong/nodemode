@@ -19,76 +19,53 @@ function getEncoding(enc?: Encoding): string | undefined {
 }
 
 // -- Async (callback) API --
+// Delegates to promises API to avoid logic duplication.
+
+function cb1<T>(optionsOrCb: unknown, cb?: Callback<T>): Callback<T> {
+  return (typeof optionsOrCb === "function" ? optionsOrCb : cb!) as Callback<T>;
+}
 
 export function readFile(path: string, encodingOrCb?: Encoding | Callback<Uint8Array | string>, cb?: Callback<Uint8Array | string>): void {
   const callback = typeof encodingOrCb === "function" ? encodingOrCb : cb!;
-  const encoding = typeof encodingOrCb === "function" ? undefined : getEncoding(encodingOrCb);
-
-  getFs().readFile(String(path)).then((data) => {
-    if (!data) return callback(new Error(`ENOENT: no such file or directory, open '${path}'`));
-    if (encoding) return callback(null, new TextDecoder().decode(data));
-    callback(null, data);
-  }).catch(callback);
+  const encoding = typeof encodingOrCb === "function" ? undefined : encodingOrCb;
+  promises.readFile(path, encoding).then((data) => callback(null, data)).catch(callback);
 }
 
 export function writeFile(path: string, data: string | Uint8Array, encodingOrCb?: Encoding | Callback<void>, cb?: Callback<void>): void {
-  const callback = typeof encodingOrCb === "function" ? encodingOrCb : cb!;
-  getFs().writeFile(String(path), typeof data === "string" ? data : new Uint8Array(data)).then(() => {
-    callback(null);
-  }).catch(callback);
+  promises.writeFile(path, data).then(() => cb1(encodingOrCb, cb)(null)).catch(cb1(encodingOrCb, cb));
 }
 
 export function appendFile(path: string, data: string | Uint8Array, encodingOrCb?: Encoding | Callback<void>, cb?: Callback<void>): void {
-  const callback = typeof encodingOrCb === "function" ? encodingOrCb : cb!;
-  getFs().appendFile(String(path), typeof data === "string" ? data : new Uint8Array(data)).then(() => {
-    callback(null);
-  }).catch(callback);
+  promises.appendFile(path, data).then(() => cb1(encodingOrCb, cb)(null)).catch(cb1(encodingOrCb, cb));
 }
 
 export function unlink(path: string, cb: Callback<void>): void {
-  getFs().unlink(String(path)).then(() => cb(null)).catch(cb);
+  promises.unlink(path).then(() => cb(null)).catch(cb);
 }
 
 export function mkdir(path: string, optionsOrCb?: { recursive?: boolean } | Callback<void>, cb?: Callback<void>): void {
-  const callback = typeof optionsOrCb === "function" ? optionsOrCb : cb!;
-  const recursive = typeof optionsOrCb === "object" ? optionsOrCb.recursive ?? false : false;
-  try {
-    getFs().mkdir(String(path), recursive);
-    callback(null);
-  } catch (e) { callback(e as Error); }
+  const opts = typeof optionsOrCb === "object" ? optionsOrCb : undefined;
+  promises.mkdir(path, opts).then(() => cb1(optionsOrCb, cb)(null)).catch(cb1(optionsOrCb, cb));
 }
 
 export function readdir(path: string, optionsOrCb?: unknown, cb?: Callback<string[]>): void {
-  const callback = (typeof optionsOrCb === "function" ? optionsOrCb : cb!) as Callback<string[]>;
-  try {
-    const entries = getFs().readdir(String(path));
-    callback(null, entries.map((e) => e.name));
-  } catch (e) { callback(e as Error); }
+  promises.readdir(path).then((entries) => cb1(optionsOrCb, cb)(null, entries)).catch(cb1(optionsOrCb, cb));
 }
 
 export function stat(path: string, cb: Callback<StatResult>): void {
-  try {
-    const s = getFs().stat(String(path));
-    if (!s) return cb(new Error(`ENOENT: no such file or directory, stat '${path}'`));
-    cb(null, new StatResult(s.size, s.mode, s.mtime, s.isDirectory));
-  } catch (e) { cb(e as Error); }
+  promises.stat(path).then((s) => cb(null, s)).catch(cb);
 }
 
 export function lstat(path: string, cb: Callback<StatResult>): void {
-  stat(path, cb); // no symlink distinction
+  stat(path, cb);
 }
 
 export function rename(oldPath: string, newPath: string, cb: Callback<void>): void {
-  getFs().rename(String(oldPath), String(newPath)).then(() => cb(null)).catch(cb);
+  promises.rename(oldPath, newPath).then(() => cb(null)).catch(cb);
 }
 
 export function copyFile(src: string, dest: string, flagsOrCb?: number | Callback<void>, cb?: Callback<void>): void {
-  const callback = typeof flagsOrCb === "function" ? flagsOrCb : cb!;
-  getFs().readFile(String(src)).then((data) => {
-    if (!data) throw new Error(`ENOENT: no such file or directory, open '${src}'`);
-    const s = getFs().stat(String(src));
-    return getFs().writeFile(String(dest), data, s?.mode);
-  }).then(() => callback(null)).catch(callback);
+  promises.copyFile(src, dest).then(() => cb1(flagsOrCb, cb)(null)).catch(cb1(flagsOrCb, cb));
 }
 
 export function existsSync(path: string): boolean {
@@ -96,38 +73,21 @@ export function existsSync(path: string): boolean {
 }
 
 export function access(path: string, modeOrCb?: unknown, cb?: Callback<void>): void {
-  const callback = (typeof modeOrCb === "function" ? modeOrCb : cb!) as Callback<void>;
-  if (getFs().exists(String(path))) callback(null);
-  else callback(new Error(`ENOENT: no such file or directory, access '${path}'`));
+  promises.access(path).then(() => cb1(modeOrCb, cb)(null)).catch(cb1(modeOrCb, cb));
 }
 
 export function rmdir(path: string, optionsOrCb?: { recursive?: boolean } | Callback<void>, cb?: Callback<void>): void {
-  const callback = typeof optionsOrCb === "function" ? optionsOrCb : cb!;
-  const recursive = typeof optionsOrCb === "object" ? optionsOrCb.recursive ?? false : false;
-  getFs().rmdir(String(path), recursive).then(() => callback(null)).catch(callback);
+  const opts = typeof optionsOrCb === "object" ? optionsOrCb : undefined;
+  promises.rmdir(path, opts).then(() => cb1(optionsOrCb, cb)(null)).catch(cb1(optionsOrCb, cb));
 }
 
 export function rm(path: string, optionsOrCb?: { recursive?: boolean; force?: boolean } | Callback<void>, cb?: Callback<void>): void {
-  const callback = typeof optionsOrCb === "function" ? optionsOrCb : cb!;
-  const options = typeof optionsOrCb === "object" ? optionsOrCb : {};
-  const recursive = options.recursive ?? false;
-  const s = getFs().stat(String(path));
-  if (!s) {
-    if (options.force) return callback(null);
-    return callback(new Error(`ENOENT: no such file or directory, rm '${path}'`));
-  }
-  if (s.isDirectory) {
-    getFs().rmdir(String(path), recursive).then(() => callback(null)).catch(callback);
-  } else {
-    getFs().unlink(String(path)).then(() => callback(null)).catch(callback);
-  }
+  const opts = typeof optionsOrCb === "object" ? optionsOrCb : undefined;
+  promises.rm(path, opts).then(() => cb1(optionsOrCb, cb)(null)).catch(cb1(optionsOrCb, cb));
 }
 
 export function chmod(path: string, mode: number, cb: Callback<void>): void {
-  try {
-    getFs().chmod(String(path), mode);
-    cb(null);
-  } catch (e) { cb(e as Error); }
+  promises.chmod(path, mode).then(() => cb(null)).catch(cb);
 }
 
 // -- Sync API --
