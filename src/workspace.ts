@@ -555,14 +555,9 @@ export class Workspace extends DurableObject<Env> {
 
       // Buffer output for hibernation persistence
       const now = Date.now();
-      for (const [stream, data] of [["stdout", result.stdout], ["stderr", result.stderr]] as const) {
-        if (data) {
-          this.sql.exec(
-            "INSERT INTO terminal_buffer (stream, data, timestamp) VALUES (?, ?, ?)",
-            stream, data, now,
-          );
-        }
-      }
+      const ins = "INSERT INTO terminal_buffer (stream, data, timestamp) VALUES (?, ?, ?)";
+      if (result.stdout) this.sql.exec(ins, "stdout", result.stdout, now);
+      if (result.stderr) this.sql.exec(ins, "stderr", result.stderr, now);
       this.trimTerminalBuffer();
 
       ws.send(JSON.stringify({
@@ -575,9 +570,8 @@ export class Workspace extends DurableObject<Env> {
       // Broadcast to other connected clients
       for (const other of this.ctx.getWebSockets()) {
         if (other !== ws) {
-          for (const [stream, data] of [["stdout", result.stdout], ["stderr", result.stderr]] as const) {
-            if (data) other.send(JSON.stringify({ stream, data }));
-          }
+          if (result.stdout) other.send(JSON.stringify({ stream: "stdout", data: result.stdout }));
+          if (result.stderr) other.send(JSON.stringify({ stream: "stderr", data: result.stderr }));
         }
       }
     }

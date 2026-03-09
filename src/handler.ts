@@ -32,18 +32,16 @@ function getWorkspace(env: Env, id: string): Fetchable {
   return env.WORKSPACE.get(doId) as unknown as Fetchable;
 }
 
-function corsHeaders(): Record<string, string> {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-action",
-    "Access-Control-Max-Age": "86400",
-  };
-}
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, x-action",
+  "Access-Control-Max-Age": "86400",
+};
 
 function withCors(response: Response): Response {
   const headers = new Headers(response.headers);
-  for (const [k, v] of Object.entries(corsHeaders())) {
+  for (const [k, v] of Object.entries(CORS_HEADERS)) {
     headers.set(k, v);
   }
   return new Response(response.body, {
@@ -70,7 +68,7 @@ export function createHandler(options: HandlerOptions = {}) {
 
     // CORS preflight
     if (cors && request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders() });
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
 
     try {
