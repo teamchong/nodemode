@@ -716,7 +716,7 @@ describe("opencode/AI agent conformance", () => {
     it("uses ls -l for detailed file listing", async () => {
       const result = await exec("ls -l myapp/src");
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("rwxr-xr-x");
+      expect(result.stdout).toContain("rw-r--r--");
       expect(result.stdout).toContain("index.ts");
     });
   });

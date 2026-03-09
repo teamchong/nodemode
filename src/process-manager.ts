@@ -353,8 +353,9 @@ export class ProcessManager {
     if (targetStat && !targetStat.isDirectory) {
       const name = paths[0];
       if (longFormat) {
+        const perms = formatMode(targetStat.mode);
         const mtime = new Date(targetStat.mtime).toISOString().slice(0, 16);
-        return ok(`-rwxr-xr-x  1 nodemode nodemode  ${String(targetStat.size).padStart(8)} ${mtime} ${name}\n`);
+        return ok(`-${perms}  1 nodemode nodemode  ${String(targetStat.size).padStart(8)} ${mtime} ${name}\n`);
       }
       return ok(name + "\n");
     }
@@ -372,8 +373,9 @@ export class ProcessManager {
         const stat = this.fs.stat(resolvePath(dir, e.name));
         const type = e.isDirectory ? "d" : "-";
         const size = stat?.size ?? 0;
+        const perms = formatMode(stat?.mode ?? 0o644);
         const mtime = stat?.mtime ? new Date(stat.mtime).toISOString().slice(0, 16) : "1970-01-01T00:00";
-        return `${type}rwxr-xr-x  1 nodemode nodemode  ${String(size).padStart(8)} ${mtime} ${e.name}`;
+        return `${type}${perms}  1 nodemode nodemode  ${String(size).padStart(8)} ${mtime} ${e.name}`;
       });
       return ok(lines.join("\n") + "\n");
     }
@@ -387,6 +389,9 @@ export class ProcessManager {
     for (let i = 0; i < args.length; i++) {
       if (args[i] === "-n" && args[i + 1]) {
         lines = parseInt(args[++i], 10);
+      } else if (/^-n\d+$/.test(args[i])) {
+        // No-space form: head -n2 file.txt
+        lines = parseInt(args[i].slice(2), 10);
       } else if (/^-\d+$/.test(args[i])) {
         // Short form: head -5 file.txt
         lines = parseInt(args[i].slice(1), 10);
@@ -448,14 +453,15 @@ export class ProcessManager {
   private async builtinGrep(args: string[], cwd: string, options?: SpawnOptions): Promise<SpawnResult> {
     // Simple grep: grep pattern [file]
     // If no file, reads from stdin (piped input)
+    const flags = args.filter((a) => a.startsWith("-")).join("");
     const nonFlags = args.filter((a) => !a.startsWith("-"));
     if (nonFlags.length < 1) {
       return fail("grep: usage: grep PATTERN [FILE]\n");
     }
     const pattern = nonFlags[0];
-    const caseInsensitive = args.includes("-i");
-    const invert = args.includes("-v");
-    const countOnly = args.includes("-c");
+    const caseInsensitive = flags.includes("i");
+    const invert = flags.includes("v");
+    const countOnly = flags.includes("c");
 
     let content: string;
     if (nonFlags.length >= 2) {
@@ -714,6 +720,16 @@ function parseCommand(command: string): { cmd: string; args: string[] } {
   if (current) tokens.push(current);
 
   return { cmd: tokens[0] || "", args: tokens.slice(1) };
+}
+
+function formatMode(mode: number): string {
+  const m = mode & 0o777;
+  let result = "";
+  for (let i = 8; i >= 0; i--) {
+    const ch = i % 3 === 2 ? "r" : i % 3 === 1 ? "w" : "x";
+    result += (m & (1 << i)) ? ch : "-";
+  }
+  return result;
 }
 
 function resolvePath(cwd: string, path: string): string {
