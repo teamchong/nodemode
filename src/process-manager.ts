@@ -365,10 +365,10 @@ export class ProcessManager {
         const stat = this.fs.stat(resolvePath(dir, e.name));
         return lsLine(e.isDirectory ? "d" : "-", stat, e.name);
       });
-      return ok(lines.join("\n") + "\n");
+      return ok(lines.length ? lines.join("\n") + "\n" : "");
     }
 
-    return ok(filtered.map((e) => e.name).join("\n") + "\n");
+    return ok(filtered.length ? filtered.map((e) => e.name).join("\n") + "\n" : "");
   }
 
   private async builtinHeadTail(cmd: "head" | "tail", args: string[], cwd: string, options?: SpawnOptions): Promise<SpawnResult> {
@@ -545,7 +545,7 @@ export class ProcessManager {
     if ("exitCode" in resolved) return resolved;
     const { src, dst } = resolved;
     const data = await this.fs.readFile(src);
-    if (data === null) return fail(`cp: ${args.filter((a) => !a.startsWith("-"))[0]}: No such file or directory\n`);
+    if (data === null) return fail(`cp: cannot stat '${src}': No such file or directory\n`);
     const stat = this.fs.stat(src);
     await this.fs.writeFile(dst, data, stat?.mode);
     return ok("");
