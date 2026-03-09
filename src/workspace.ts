@@ -455,11 +455,8 @@ export class Workspace extends DurableObject<Env> {
 
     try {
       const fetcher = container.getTcpPort(8080);
-      const response = await fetcher.fetch("http://container/healthz");
-      if (!response.ok) {
-        this.containerStatus = "crashed";
-        return;
-      }
+      const res = await fetcher.fetch("http://container/healthz");
+      if (!res.ok) throw new Error("unhealthy");
     } catch {
       this.containerStatus = "crashed";
       return;
