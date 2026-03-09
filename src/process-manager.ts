@@ -662,40 +662,29 @@ function splitPipeline(command: string): string[] {
 }
 
 function splitChain(command: string): ChainSegment[] {
-  // Split on &&, ||, ; outside quotes
   const segments: ChainSegment[] = [];
   let current = "";
   let inSingle = false;
   let inDouble = false;
   let pendingOp: ChainSegment["operator"] = "";
 
+  const flush = (nextOp: ChainSegment["operator"]) => {
+    segments.push({ command: current.trim(), operator: pendingOp });
+    current = "";
+    pendingOp = nextOp;
+  };
+
   for (let i = 0; i < command.length; i++) {
     const ch = command[i];
-    if (ch === "'" && !inDouble) { inSingle = !inSingle; current += ch; continue; }
-    if (ch === '"' && !inSingle) { inDouble = !inDouble; current += ch; continue; }
-    if (inSingle || inDouble) { current += ch; continue; }
-
-    if (ch === "&" && command[i + 1] === "&") {
-      segments.push({ command: current.trim(), operator: pendingOp });
-      current = "";
-      pendingOp = "&&";
-      i++; // skip second &
-    } else if (ch === "|" && command[i + 1] === "|") {
-      segments.push({ command: current.trim(), operator: pendingOp });
-      current = "";
-      pendingOp = "||";
-      i++; // skip second |
-    } else if (ch === ";") {
-      segments.push({ command: current.trim(), operator: pendingOp });
-      current = "";
-      pendingOp = ";";
-    } else {
-      current += ch;
-    }
+    if (ch === "'" && !inDouble) { inSingle = !inSingle; current += ch; }
+    else if (ch === '"' && !inSingle) { inDouble = !inDouble; current += ch; }
+    else if (inSingle || inDouble) { current += ch; }
+    else if (ch === "&" && command[i + 1] === "&") { flush("&&"); i++; }
+    else if (ch === "|" && command[i + 1] === "|") { flush("||"); i++; }
+    else if (ch === ";") { flush(";"); }
+    else { current += ch; }
   }
-  if (current.trim()) {
-    segments.push({ command: current.trim(), operator: pendingOp });
-  }
+  if (current.trim()) flush("");
   return segments;
 }
 

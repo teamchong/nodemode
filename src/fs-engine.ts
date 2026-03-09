@@ -416,7 +416,7 @@ export class FsEngine {
     return `${this.workspace}/${normalizedPath}`;
   }
 
-  private ensureParentDirs(path: string): void {
+  ensureParentDirs(path: string): void {
     const parts = path.split("/");
     const now = Date.now();
     for (let i = 1; i < parts.length; i++) {

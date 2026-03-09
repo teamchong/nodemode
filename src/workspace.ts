@@ -584,6 +584,7 @@ export class Workspace extends DurableObject<Env> {
   // -- Internal helpers --
 
   private upsertFileIndex(path: string, r2Key: string, size: number): void {
+    this.fs.ensureParentDirs(path);
     const rows = this.sql.exec("SELECT mode FROM files WHERE path = ?", path).toArray();
     const mode = rows.length > 0 ? (rows[0].mode as number) : 0o644;
     this.sql.exec(
