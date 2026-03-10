@@ -39,6 +39,7 @@ const MAX_PROCESS_ROWS = 1000;
 const MAX_STORED_OUTPUT = 4096; // Truncate stdout/stderr stored in process table
 const MAX_PIPELINE_BYTES = 10 * 1024 * 1024; // 10MB cap on in-memory pipeline data
 const PRUNE_INTERVAL = 50; // Only check prune every N executions
+const NUMERIC_OPS = new Set(["-eq", "-ne", "-lt", "-le", "-gt", "-ge"]);
 
 const BUILTIN_COMMANDS = new Set([
   "echo",
@@ -608,8 +609,20 @@ export class ProcessManager {
       // Single arg: test STRING → true if non-empty
       pass = a[0] !== "";
     } else if (a.length >= 3 && (a[1] === "=" || a[1] === "!=")) {
-      // Binary operators: test A = B, test A != B
+      // String comparison: test A = B, test A != B
       pass = a[1] === "=" ? a[0] === a[2] : a[0] !== a[2];
+    } else if (a.length >= 3 && NUMERIC_OPS.has(a[1])) {
+      // Numeric comparison: test A -eq B, test A -lt B, etc.
+      const l = parseInt(a[0], 10) || 0;
+      const r = parseInt(a[2], 10) || 0;
+      switch (a[1]) {
+        case "-eq": pass = l === r; break;
+        case "-ne": pass = l !== r; break;
+        case "-lt": pass = l < r; break;
+        case "-le": pass = l <= r; break;
+        case "-gt": pass = l > r; break;
+        case "-ge": pass = l >= r; break;
+      }
     } else {
       // Unary operators
       switch (a[0]) {
@@ -622,6 +635,11 @@ export class ProcessManager {
         case "-e":
           pass = !!a[1] && this.fs.exists(resolvePath(cwd, a[1]));
           break;
+        case "-s": {
+          const s = a[1] ? this.fs.stat(resolvePath(cwd, a[1])) : null;
+          pass = !!s && s.size > 0;
+          break;
+        }
         case "-z":
           pass = !a[1];
           break;

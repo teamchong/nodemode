@@ -763,6 +763,27 @@ describe("nodemode", () => {
     expect(result.stderr).toContain("missing argument");
   });
 
+  it("test supports numeric comparison operators", async () => {
+    expect((await exec("test 1 -eq 1")).exitCode).toBe(0);
+    expect((await exec("test 1 -eq 2")).exitCode).toBe(1);
+    expect((await exec("test 1 -lt 2")).exitCode).toBe(0);
+    expect((await exec("test 2 -lt 1")).exitCode).toBe(1);
+    expect((await exec("test 2 -gt 1")).exitCode).toBe(0);
+    expect((await exec("test 5 -le 5")).exitCode).toBe(0);
+    expect((await exec("test 5 -ge 5")).exitCode).toBe(0);
+    expect((await exec("test 1 -ne 2")).exitCode).toBe(0);
+  });
+
+  it("test -s checks file is non-empty", async () => {
+    await writeFile("nonempty.txt", "content");
+    expect((await exec("test -s nonempty.txt")).exitCode).toBe(0);
+
+    await writeFile("empty.txt", "");
+    expect((await exec("test -s empty.txt")).exitCode).toBe(1);
+
+    expect((await exec("test -s nonexistent-file.txt")).exitCode).toBe(1);
+  });
+
   it("500 errors do not leak internal details", async () => {
     // Force an internal error by sending invalid JSON to a POST endpoint
     const res = await SELF.fetch(
