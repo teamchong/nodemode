@@ -179,6 +179,14 @@ export class FsEngine {
     const normalized = normalizePath(path);
     validatePath(normalized);
 
+    const existing = this.stat(normalized);
+    if (!existing) {
+      throw new Error(`ENOENT: no such file or directory '${path}'`);
+    }
+    if (!existing.isDirectory) {
+      throw new Error(`ENOTDIR: not a directory '${path}'`);
+    }
+
     const escaped = escapeLike(normalized);
 
     if (recursive) {

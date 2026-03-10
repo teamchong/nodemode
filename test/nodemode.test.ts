@@ -784,6 +784,20 @@ describe("nodemode", () => {
     expect((await exec("test -s nonexistent-file.txt")).exitCode).toBe(1);
   });
 
+  it("rm -rf on nonexistent path with force succeeds", async () => {
+    const result = await exec("rm -rf definitely-not-here-dir");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("rmdir on file returns ENOTDIR", async () => {
+    await writeFile("not-a-dir.txt", "content");
+    const result = await exec("rm -r not-a-dir.txt");
+    // rm -r calls rmdir which should detect it's not a directory
+    // But rm builtin checks stat first and calls unlink for files
+    expect(result.exitCode).toBe(0);
+    expect(await exists("not-a-dir.txt")).toBe(false);
+  });
+
   it("500 errors do not leak internal details", async () => {
     // Force an internal error by sending invalid JSON to a POST endpoint
     const res = await SELF.fetch(

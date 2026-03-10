@@ -632,7 +632,7 @@ function json(data: unknown, status: number = 200): Response {
 }
 
 // Known filesystem error prefixes — safe to return to clients as 400
-const FS_ERROR_PREFIXES = ["EISDIR:", "ENOENT:", "EEXIST:", "ENOTEMPTY:", "EINVAL:"];
+const FS_ERROR_PREFIXES = ["EISDIR:", "ENOENT:", "EEXIST:", "ENOTEMPTY:", "EINVAL:", "ENOTDIR:"];
 function isFsError(msg: string): boolean {
   return FS_ERROR_PREFIXES.some((p) => msg.startsWith(p));
 }
