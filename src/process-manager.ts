@@ -1,15 +1,20 @@
 // ProcessManager — maps Node.js child_process to tiered Cloudflare execution
 //
-// Tier 1: Built-in emulators (cat, ls, grep, echo, pwd, env, head, tail, wc)
+// Tier 1: Shell builtins (cat, ls, grep, echo, pwd, env, head, tail, wc)
 //         Handle in DO directly — $0, <1ms
 //
-// Tier 2: Container spawn (npm, node, python, cargo, make, gcc)
-//         Spawn Cloudflare Container — ~$0.02/hr, real Linux
+// Tier 2: JS execution (node script.js, npx, ts-node)
+//         Run in DO via JsRunner — $0, ~ms, V8 isolate IS the engine
+//
+// Tier 3: Native binaries (gcc, python, cargo, make)
+//         Container — last resort, only when native code is required
 //
 // Permission model adapted from edgebox:
 //   { "allow": ["git", "npm", "node"], "deny": ["sudo", "rm -rf"] }
 
 import type { FsEngine } from "./fs-engine";
+import type { UnsafeEval } from "./env";
+import { JsRunner } from "./js-runner";
 import { validateCommand } from "./validate";
 
 export interface SpawnOptions {
@@ -81,6 +86,7 @@ export class ProcessManager {
     private fs: FsEngine,
     private cwd: string = "/",
     private containerExec?: ContainerExecFn,
+    private unsafeEval?: UnsafeEval,
   ) {}
 
   async exec(command: string, options: SpawnOptions = {}): Promise<SpawnResult> {
@@ -173,9 +179,17 @@ export class ProcessManager {
     const { cmd, args } = parseCommand(command);
     const effectiveCwd = options.cwd || this.cwd;
 
+    // Tier 1: Shell builtins — DO, $0, <1ms
     if (BUILTIN_COMMANDS.has(cmd)) {
       return this.execBuiltin(cmd, args, effectiveCwd, options);
-    } else if (this.containerExec) {
+    }
+
+    // Tier 2: JS execution — DO, $0, ~ms
+    const jsResult = await this.tryJsExec(cmd, args, effectiveCwd, options);
+    if (jsResult) return jsResult;
+
+    // Tier 3: Container — last resort, native binaries only
+    if (this.containerExec) {
       return this.containerExec(command, {
         cwd: effectiveCwd,
         env: options.env,
@@ -184,8 +198,60 @@ export class ProcessManager {
     return {
       exitCode: 127,
       stdout: "",
-      stderr: `nodemode: command not found: ${cmd}\nNo container available. Built-in commands: ${[...BUILTIN_COMMANDS].join(", ")}`,
+      stderr: `nodemode: command not found: ${cmd}\nBuilt-in commands: ${[...BUILTIN_COMMANDS].join(", ")}`,
     };
+  }
+
+  private async tryJsExec(
+    cmd: string,
+    args: string[],
+    cwd: string,
+    options: SpawnOptions,
+  ): Promise<SpawnResult | null> {
+    const runner = new JsRunner(this.fs, this, cwd, this.unsafeEval);
+
+    // `node script.js [args...]`
+    if (cmd === "node" && args.length > 0 && !args[0].startsWith("-")) {
+      // Resolve relative to cwd — prefix bare names with ./ so resolver treats as path
+      const entry = args[0].startsWith("/") || args[0].startsWith("./") || args[0].startsWith("../")
+        ? args[0]
+        : "./" + args[0];
+      return runner.run(entry, args.slice(1), options.env);
+    }
+
+    // `node -e "code"` / `node --eval "code"`
+    if (cmd === "node" && (args[0] === "-e" || args[0] === "--eval") && args[1]) {
+      // Write to temp file and execute
+      const tmpPath = `./__nodemode_eval_${Date.now()}.js`;
+      await this.fs.writeFile(tmpPath, args[1]);
+      try {
+        return await runner.run(tmpPath, [], options.env);
+      } finally {
+        await this.fs.unlink(tmpPath);
+      }
+    }
+
+    // `node -p "expr"` / `node --print "expr"`
+    if (cmd === "node" && (args[0] === "-p" || args[0] === "--print") && args[1]) {
+      const tmpPath = `./__nodemode_eval_${Date.now()}.js`;
+      const code = `const __result = (${args[1]}); process.stdout.write(String(__result) + "\\n");`;
+      await this.fs.writeFile(tmpPath, code);
+      try {
+        return await runner.run(tmpPath, [], options.env);
+      } finally {
+        await this.fs.unlink(tmpPath);
+      }
+    }
+
+    // Direct JS file execution: `./script.js` or `script.js` (if file exists)
+    if (!cmd.startsWith("-")) {
+      const resolved = await runner.resolve(cmd, cwd);
+      if (resolved && (resolved.endsWith(".js") || resolved.endsWith(".mjs") || resolved.endsWith(".ts") || resolved.endsWith(".mts"))) {
+        return runner.run(cmd, args, options.env);
+      }
+    }
+
+    return null;
   }
 
   private pruneProcessTable(): void {

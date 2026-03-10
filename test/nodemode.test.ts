@@ -798,6 +798,124 @@ describe("nodemode", () => {
     expect(await exists("not-a-dir.txt")).toBe(false);
   });
 
+  // -- JsRunner (Tier 2: node execution in DO) --
+
+  it("node executes JS file in-DO", async () => {
+    await writeFile("hello.js", 'console.log("hello from DO");');
+    const result = await exec("node hello.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("hello from DO");
+  });
+
+  it("node -e executes inline code", async () => {
+    const result = await exec('node -e "console.log(2 + 2)"');
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("4");
+  });
+
+  it("node -p prints expression result", async () => {
+    const result = await exec('node -p "Math.PI.toFixed(2)"');
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("3.14");
+  });
+
+  it("node require(fs) reads files in-DO", async () => {
+    await writeFile("data.txt", "file content here");
+    await writeFile("read-fs.js", `
+      const fs = require("fs");
+      const data = fs.readFileSync("data.txt", "utf8");
+      console.log(data);
+    `);
+    const result = await exec("node read-fs.js");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("file content here");
+  });
+
+  it("node require(fs) writeFileSync + readFileSync round-trip", async () => {
+    await writeFile("write-read.js", `
+      const fs = require("fs");
+      fs.writeFileSync("created.txt", "created by JS");
+      const out = fs.readFileSync("created.txt", "utf8");
+      console.log(out);
+    `);
+    const result = await exec("node write-read.js");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("created by JS");
+  });
+
+  it("node require(path) works", async () => {
+    await writeFile("path-test.js", `
+      const path = require("path");
+      console.log(path.join("a", "b", "c"));
+      console.log(path.dirname("/foo/bar/baz.js"));
+      console.log(path.extname("file.ts"));
+    `);
+    const result = await exec("node path-test.js");
+    expect(result.exitCode).toBe(0);
+    const lines = result.stdout.trim().split("\n");
+    expect(lines[0]).toBe("a/b/c");
+    expect(lines[1]).toBe("/foo/bar");
+    expect(lines[2]).toBe(".ts");
+  });
+
+  it("node process.exit sets exit code", async () => {
+    await writeFile("exit-test.js", `
+      console.log("before");
+      process.exit(42);
+      console.log("after");
+    `);
+    const result = await exec("node exit-test.js");
+    expect(result.exitCode).toBe(42);
+    expect(result.stdout).toContain("before");
+    expect(result.stdout).not.toContain("after");
+  });
+
+  it("node require resolves relative modules", async () => {
+    await writeFile("lib/greet.js", 'module.exports = function(name) { return "hi " + name; };');
+    await writeFile("use-lib.js", `
+      const greet = require("./lib/greet");
+      console.log(greet("world"));
+    `);
+    const result = await exec("node use-lib.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("hi world");
+  });
+
+  it("node returns error for missing module", async () => {
+    const result = await exec("node nonexistent.js");
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Cannot find module");
+  });
+
+  it("direct JS file execution (./script.js)", async () => {
+    await writeFile("direct.js", 'console.log("direct exec");');
+    const result = await exec("./direct.js");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("direct exec");
+  });
+
+  it("node passes args via process.argv", async () => {
+    await writeFile("args.js", 'console.log(process.argv.slice(2).join(","));');
+    const result = await exec("node args.js foo bar baz");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("foo,bar,baz");
+  });
+
+  it("node JSON require works", async () => {
+    await writeFile("config.json", '{"port": 3000}');
+    await writeFile("load-json.js", `
+      const config = require("./config.json");
+      console.log(config.port);
+    `);
+    const result = await exec("node load-json.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("3000");
+  });
+
   it("invalid JSON returns 400 not 500", async () => {
     const res = await SELF.fetch(
       `http://localhost/workspace/${workspaceId}/exec`,

@@ -15,6 +15,7 @@
 export { Workspace } from "./workspace";
 export { FsEngine, normalizePath } from "./fs-engine";
 export { ProcessManager } from "./process-manager";
+export { JsRunner } from "./js-runner";
 export { createHandler } from "./handler";
 export { ValidationError, validatePath, validateCommand } from "./validate";
 export { setContext, clearContext } from "./shims/context";

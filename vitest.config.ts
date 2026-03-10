@@ -6,6 +6,9 @@ export default defineWorkersConfig({
       workers: {
         isolatedStorage: false,
         wrangler: { configPath: "./test/wrangler.jsonc" },
+        miniflare: {
+          unsafeEvalBinding: "UNSAFE_EVAL",
+        },
       },
     },
   },

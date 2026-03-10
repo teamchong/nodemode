@@ -48,6 +48,7 @@ export class Workspace extends DurableObject<Env> {
       this.fs,
       "/",
       (command, options) => this.execInContainer(command, options),
+      env.UNSAFE_EVAL,
     );
 
     // Restore container status from live state after hibernation wake

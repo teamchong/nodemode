@@ -29,5 +29,12 @@
 
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Workspace"] }
-  ]
+  ],
+
+  // UnsafeEval binding — required for JsRunner to execute JS from virtual fs
+  "unsafe": {
+    "bindings": [
+      { "name": "UNSAFE_EVAL", "type": "unsafe_eval" }
+    ]
+  }
 }

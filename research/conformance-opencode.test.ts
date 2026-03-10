@@ -314,7 +314,7 @@ describe("opencode/AI agent conformance", () => {
 
   describe("Phase 4: Build and tooling", () => {
     it("non-builtin commands report exit 127 without container", async () => {
-      // In test env (no container), npm/tsc/node return 127
+      // In test env (no container), npm/tsc return 127
       // In production with container, these would actually execute
       const npm = await exec("npm install");
       expect(npm.exitCode).toBe(127);
@@ -322,9 +322,12 @@ describe("opencode/AI agent conformance", () => {
 
       const tsc = await exec("tsc --noEmit");
       expect(tsc.exitCode).toBe(127);
+    });
 
+    it("node executes JS in-DO via JsRunner, returns error for missing module", async () => {
       const node = await exec("node dist/index.js");
-      expect(node.exitCode).toBe(127);
+      expect(node.exitCode).toBe(1);
+      expect(node.stderr).toContain("Cannot find module");
     });
 
     it("builtin commands still work alongside container commands", async () => {
