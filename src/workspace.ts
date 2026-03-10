@@ -541,6 +541,7 @@ export class Workspace extends DurableObject<Env> {
     if (msg.type === "exec" && msg.command) {
       let result;
       try {
+        if (msg.cwd) validatePath(msg.cwd);
         result = await this.processes.exec(msg.command, { cwd: msg.cwd });
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
