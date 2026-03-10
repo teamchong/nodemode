@@ -243,12 +243,58 @@ export class ProcessManager {
       }
     }
 
+    // `npx command [args...]` — resolve bin from node_modules
+    if (cmd === "npx" && args.length > 0) {
+      const binEntry = await this.resolveNpxBin(args[0], cwd);
+      if (binEntry) {
+        return runner.run(binEntry, args.slice(1), options.env);
+      }
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: `npx: command '${args[0]}' not found in node_modules\n`,
+      };
+    }
+
     // Direct JS file execution: `./script.js` or `script.js` (if file exists)
     if (!cmd.startsWith("-")) {
       const resolved = await runner.resolve(cmd, cwd);
       if (resolved && (resolved.endsWith(".js") || resolved.endsWith(".mjs") || resolved.endsWith(".ts") || resolved.endsWith(".mts"))) {
         return runner.run(cmd, args, options.env);
       }
+    }
+
+    return null;
+  }
+
+  private async resolveNpxBin(name: string, cwd: string): Promise<string | null> {
+    // 1. Check node_modules/.bin/{name} — typically a JS file
+    const cwdPrefix = cwd === "/" ? "" : cwd.replace(/^\/+/, "").replace(/\/+$/, "");
+    const binPath = cwdPrefix ? `${cwdPrefix}/node_modules/.bin/${name}` : `node_modules/.bin/${name}`;
+    if (this.fs.exists(binPath)) {
+      return "./" + binPath;
+    }
+
+    // 2. Check node_modules/{name}/package.json#bin
+    const pkgPath = cwdPrefix ? `${cwdPrefix}/node_modules/${name}/package.json` : `node_modules/${name}/package.json`;
+    const pkgText = await this.fs.readFileText(pkgPath);
+    if (pkgText) {
+      try {
+        const pkg = JSON.parse(pkgText) as { bin?: string | Record<string, string>; main?: string };
+        let entry: string | undefined;
+        if (typeof pkg.bin === "string") {
+          entry = pkg.bin;
+        } else if (typeof pkg.bin === "object" && pkg.bin[name]) {
+          entry = pkg.bin[name];
+        }
+        if (!entry) entry = pkg.main;
+        if (entry) {
+          const full = cwdPrefix
+            ? `${cwdPrefix}/node_modules/${name}/${entry}`
+            : `node_modules/${name}/${entry}`;
+          if (this.fs.exists(full)) return "./" + full;
+        }
+      } catch { /* invalid package.json */ }
     }
 
     return null;

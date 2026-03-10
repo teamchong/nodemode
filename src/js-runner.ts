@@ -17,6 +17,9 @@
 import type { FsEngine } from "./fs-engine";
 import type { ProcessManager } from "./process-manager";
 import type { UnsafeEval } from "./env";
+// Workers with nodejs_compat provide node:crypto with synchronous createHash
+// @ts-expect-error — node:crypto types not in @cloudflare/workers-types
+import * as nodeCrypto from "node:crypto";
 
 export interface RunResult {
   exitCode: number;
@@ -24,7 +27,7 @@ export interface RunResult {
   stderr: string;
 }
 
-const JS_EXTENSIONS = [".js", ".mjs", ".ts", ".mts"];
+const JS_EXTENSIONS = [".js", ".mjs", ".ts", ".mts", ".json"];
 const INDEX_FILES = ["index.js", "index.ts", "index.mjs"];
 const BUILTIN_MODULES = new Set([
   "fs", "path", "child_process", "os", "util", "events",
@@ -125,7 +128,7 @@ export class JsRunner {
     const requireFn = this.buildRequireFn(dirName, ctx);
     const { consoleShim, processShim, globalRef } = this.buildShims(ctx);
 
-    const js = stripTypes(source);
+    const js = prepareSource(source);
 
     const paramList = "exports, require, module, __filename, __dirname, console, process, setTimeout, clearTimeout, setInterval, clearInterval, Buffer, global, globalThis, queueMicrotask, URL, URLSearchParams, TextEncoder, TextDecoder, atob, btoa";
 
@@ -155,23 +158,26 @@ export class JsRunner {
 
     const dirName = absPath.includes("/") ? absPath.slice(0, absPath.lastIndexOf("/")) : "";
 
-    // Scan for require("...") and require('...') calls
+    // Scan for require("...") and import ... from "..." statements
+    const specifiers: string[] = [];
     const requirePattern = /\brequire\s*\(\s*(['"])([^'"]+)\1\s*\)/g;
+    const importPattern = /\bimport\s+(?:[\s\S]*?\s+from\s+)?(['"])([^'"]+)\1/g;
     let match;
-    while ((match = requirePattern.exec(source)) !== null) {
-      const specifier = match[2];
-      // Skip built-in modules
-      const builtinName = specifier.replace(/^node:/, "");
-      if (BUILTIN_MODULES.has(builtinName)) continue;
+    while ((match = requirePattern.exec(source)) !== null) specifiers.push(match[2]);
+    while ((match = importPattern.exec(source)) !== null) specifiers.push(match[2]);
 
-      const resolved = await this.resolve(specifier, dirName);
-      if (resolved) {
-        // Read the file to populate SQLite cache (readFile caches automatically)
-        await this.fs.readFile(resolved);
-        // Recursively pre-load dependencies of this file
-        await this.preloadDependencies(resolved, visited);
-      }
-    }
+    // Resolve and read all dependencies in parallel
+    const filtered = specifiers.filter((s) => !BUILTIN_MODULES.has(s.replace(/^node:/, "")));
+    const resolved = await Promise.all(
+      filtered.map((s) => this.resolve(s, dirName)),
+    );
+    const uniquePaths = [...new Set(resolved.filter((r): r is string => r !== null && !visited.has(r)))];
+
+    // Read all files into cache in parallel
+    await Promise.all(uniquePaths.map((p) => this.fs.readFile(p)));
+
+    // Recursively preload (mark visited first to avoid duplicate work)
+    await Promise.all(uniquePaths.map((p) => this.preloadDependencies(p, visited)));
   }
 
   // Synchronous module loading — reads source from SQLite cache (populated by preloadDependencies)
@@ -214,7 +220,7 @@ export class JsRunner {
 
     const { consoleShim, processShim, globalRef } = this.buildShims(ctx);
 
-    const js = stripTypes(source);
+    const js = prepareSource(source);
     const paramList = "exports, require, module, __filename, __dirname, console, process, setTimeout, clearTimeout, setInterval, clearInterval, Buffer, global, globalThis, queueMicrotask, URL, URLSearchParams, TextEncoder, TextDecoder, atob, btoa";
     const fn = this.compileFunction(paramList, js);
 
@@ -1114,36 +1120,20 @@ function buildAssertModule(): Record<string, unknown> {
 }
 
 function buildCryptoModule(): Record<string, unknown> {
+  // Delegate to Workers' node:crypto (nodejs_compat) for synchronous createHash
   return {
-    randomBytes: (size: number): Uint8Array => {
-      const buf = new Uint8Array(size);
-      crypto.getRandomValues(buf);
-      return buf;
-    },
-    randomUUID: () => crypto.randomUUID(),
-    createHash: (algorithm: string) => {
-      const chunks: Uint8Array[] = [];
-      return {
-        update(data: string | Uint8Array) {
-          chunks.push(typeof data === "string" ? new TextEncoder().encode(data) : data);
-          return this;
-        },
-        async digest(encoding?: string): Promise<string | Uint8Array> {
-          const total = BufferShim.concat(chunks);
-          const alg = algorithm === "sha256" ? "SHA-256" : algorithm === "sha1" ? "SHA-1" : algorithm === "sha512" ? "SHA-512" : algorithm === "md5" ? "MD5" : algorithm.toUpperCase();
-          const hash = new Uint8Array(await crypto.subtle.digest(alg, total));
-          if (encoding === "hex") return Array.from(hash).map((b) => b.toString(16).padStart(2, "0")).join("");
-          if (encoding === "base64") return btoa(String.fromCharCode(...hash));
-          return hash;
-        },
-      };
-    },
-    timingSafeEqual: (a: Uint8Array, b: Uint8Array): boolean => {
-      if (a.length !== b.length) return false;
-      let result = 0;
-      for (let i = 0; i < a.length; i++) result |= a[i] ^ b[i];
-      return result === 0;
-    },
+    createHash: nodeCrypto.createHash,
+    createHmac: nodeCrypto.createHmac,
+    randomBytes: nodeCrypto.randomBytes,
+    randomUUID: nodeCrypto.randomUUID,
+    timingSafeEqual: nodeCrypto.timingSafeEqual,
+    createCipheriv: nodeCrypto.createCipheriv,
+    createDecipheriv: nodeCrypto.createDecipheriv,
+    pbkdf2: nodeCrypto.pbkdf2,
+    pbkdf2Sync: nodeCrypto.pbkdf2Sync,
+    scrypt: nodeCrypto.scrypt,
+    scryptSync: nodeCrypto.scryptSync,
+    constants: nodeCrypto.constants,
   };
 }
 
@@ -1173,17 +1163,132 @@ function urlParse(urlStr: string): Record<string, string | null> {
   }
 }
 
+// Pipeline: strip TS types → convert ESM to CJS
+function prepareSource(source: string): string {
+  return esmToCjs(stripTypes(source));
+}
+
+// Converts ESM import/export syntax to CJS require/module.exports.
+function esmToCjs(source: string): string {
+  let r = source;
+
+  // import X from "mod" → const X = require("mod").default || require("mod")
+  r = r.replace(
+    /^\s*import\s+(\w+)\s+from\s+(['"])([^'"]+)\2\s*;?\s*$/gm,
+    (_m, name, _q, mod) => `const ${name} = require("${mod}");`,
+  );
+
+  // import { a, b as c } from "mod" → const { a, b: c } = require("mod")
+  r = r.replace(
+    /^\s*import\s+\{([^}]+)\}\s+from\s+(['"])([^'"]+)\2\s*;?\s*$/gm,
+    (_m, imports, _q, mod) => {
+      const mapped = imports.split(",").map((s: string) => {
+        const parts = s.trim().split(/\s+as\s+/);
+        return parts.length === 2 ? `${parts[0].trim()}: ${parts[1].trim()}` : parts[0].trim();
+      }).filter(Boolean).join(", ");
+      return `const { ${mapped} } = require("${mod}");`;
+    },
+  );
+
+  // import * as X from "mod" → const X = require("mod")
+  r = r.replace(
+    /^\s*import\s+\*\s+as\s+(\w+)\s+from\s+(['"])([^'"]+)\2\s*;?\s*$/gm,
+    (_m, name, _q, mod) => `const ${name} = require("${mod}");`,
+  );
+
+  // import "mod" → require("mod")
+  r = r.replace(
+    /^\s*import\s+(['"])([^'"]+)\1\s*;?\s*$/gm,
+    (_m, _q, mod) => `require("${mod}");`,
+  );
+
+  // export default expression → module.exports = expression
+  r = r.replace(
+    /^\s*export\s+default\s+/gm,
+    "module.exports = ",
+  );
+
+  // export { a, b, c as d } → Object.assign(module.exports, { a, b, d: c })
+  r = r.replace(
+    /^\s*export\s+\{([^}]+)\}\s*;?\s*$/gm,
+    (_m, exports) => {
+      const mapped = exports.split(",").map((s: string) => {
+        const parts = s.trim().split(/\s+as\s+/);
+        return parts.length === 2 ? `${parts[1].trim()}: ${parts[0].trim()}` : parts[0].trim();
+      }).filter(Boolean).join(", ");
+      return `Object.assign(module.exports, { ${mapped} });`;
+    },
+  );
+
+  // export const/let/var name = ... → const/let/var name = ...; module.exports.name = name;
+  r = r.replace(
+    /^\s*export\s+(const|let|var)\s+(\w+)/gm,
+    (_m, kw, name) => `${kw} ${name}`,
+  );
+  // For the above, we need to add module.exports assignments. Collect exported names and append.
+  const exportedVars: string[] = [];
+  source.replace(
+    /^\s*export\s+(?:const|let|var)\s+(\w+)/gm,
+    (_m, name) => { exportedVars.push(name); return ""; },
+  );
+
+  // export function name / export class name
+  r = r.replace(
+    /^\s*export\s+(function|class)\s+(\w+)/gm,
+    (_m, kw, name) => { exportedVars.push(name); return `${kw} ${name}`; },
+  );
+
+  // Append module.exports assignments for exported declarations
+  if (exportedVars.length > 0) {
+    const assignments = exportedVars
+      .map((n) => `module.exports.${n} = ${n};`)
+      .join("\n");
+    r += "\n" + assignments;
+  }
+
+  return r;
+}
+
 // Removes TypeScript type annotations so the V8 isolate can execute the code.
-// Handles: type imports, annotations, interfaces, type aliases, as-casts.
+// Uses multi-pass regex stripping — handles the most common TS patterns.
 function stripTypes(source: string): string {
-  let result = source;
-  result = result.replace(/^\s*import\s+type\s+\{[^}]*\}\s+from\s+['"][^'"]*['"];?\s*$/gm, "");
-  result = result.replace(/^\s*import\s+type\s+\w+\s+from\s+['"][^'"]*['"];?\s*$/gm, "");
-  result = result.replace(/:\s*(?:string|number|boolean|any|void|never|unknown|null|undefined|object)(?:\[\])?\s*([=;,)])/g, "$1");
-  result = result.replace(/^\s*(?:export\s+)?interface\s+\w+[^{]*\{[^}]*\}\s*$/gm, "");
-  result = result.replace(/^\s*(?:export\s+)?type\s+\w+\s*=[^;]*;\s*$/gm, "");
-  result = result.replace(/\s+as\s+\w+(?:<[^>]*>)?/g, "");
-  return result;
+  let r = source;
+
+  // 1. Remove import type statements (single-line and multi-line)
+  r = r.replace(/^\s*import\s+type\s+[\s\S]*?from\s+['"][^'"]*['"];?\s*$/gm, "");
+
+  // 2. Remove export type / export interface blocks (multi-line aware)
+  r = r.replace(/^\s*(?:export\s+)?(?:declare\s+)?interface\s+\w+[\s\S]*?^\s*\}/gm, "");
+  r = r.replace(/^\s*(?:export\s+)?(?:declare\s+)?type\s+\w+\s*(?:<[^>]*>)?\s*=[^;]*;\s*$/gm, "");
+
+  // 3. Remove enum declarations
+  r = r.replace(/^\s*(?:export\s+)?(?:const\s+)?enum\s+\w+\s*\{[\s\S]*?^\s*\}/gm, "");
+
+  // 4. Remove declare statements
+  r = r.replace(/^\s*declare\s+.*$/gm, "");
+
+  // 5. Strip generic type parameters from function/class declarations: foo<T, U>( → foo(
+  r = r.replace(/(<[^>()]*>)\s*(?=\()/g, "");
+
+  // 6. Strip return type annotations: ): string { → ) {
+  r = r.replace(/\)\s*:\s*[^{=]*?(?=\s*[{=])/g, ")");
+
+  // 7. Strip parameter type annotations: (x: string, y: number) → (x, y)
+  //    Handle complex types including generics, unions, intersections, arrays
+  r = r.replace(/(\w)\s*:\s*(?:[A-Za-z_$][\w$.]*(?:<[^>]*>)?(?:\[\])*(?:\s*[|&]\s*[A-Za-z_$][\w$.]*(?:<[^>]*>)?(?:\[\])*)*)(\s*[,)=])/g, "$1$2");
+  // Also handle simple keyword types
+  r = r.replace(/(\w)\s*:\s*(?:string|number|boolean|any|void|never|unknown|null|undefined|object|bigint|symbol)(?:\[\])*(\s*[,)=;])/g, "$1$2");
+
+  // 8. Strip as-casts: value as Type → value
+  r = r.replace(/\s+as\s+(?:const|[A-Za-z_$][\w$.]*(?:<[^>]*>)?(?:\[\])*)/g, "");
+
+  // 9. Strip non-null assertions: value! → value (but not !== or !=)
+  r = r.replace(/(\w)\s*!(?=[.[\s,);])/g, "$1");
+
+  // 10. Remove angle-bracket type assertions: <Type>value → value
+  r = r.replace(/<[A-Za-z_$][\w$.]*(?:<[^>]*>)?>\s*(?=\w)/g, "");
+
+  return r;
 }
 
 function escapeLike(s: string): string {

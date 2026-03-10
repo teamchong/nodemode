@@ -916,6 +916,151 @@ describe("nodemode", () => {
     expect(result.stdout.trim()).toBe("3000");
   });
 
+  it("node require resolves .json without extension", async () => {
+    await writeFile("pkg-info.json", '{"name": "myapp"}');
+    await writeFile("load-pkg.js", `
+      const pkg = require("./pkg-info");
+      console.log(pkg.name);
+    `);
+    const result = await exec("node load-pkg.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("myapp");
+  });
+
+  it("node crypto.createHash is synchronous", async () => {
+    await writeFile("hash-test.js", `
+      const crypto = require("crypto");
+      const hash = crypto.createHash("sha256").update("hello").digest("hex");
+      console.log(typeof hash);
+      console.log(hash);
+    `);
+    const result = await exec("node hash-test.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    const lines = result.stdout.trim().split("\n");
+    expect(lines[0]).toBe("string");
+    expect(lines[1]).toBe("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+  });
+
+  it("node executes TypeScript with type annotations", async () => {
+    await writeFile("typed.ts", `
+      interface Config {
+        port: number;
+        host: string;
+      }
+
+      function greet(name: string): string {
+        return "hello " + name;
+      }
+
+      const cfg: Config = { port: 3000, host: "localhost" };
+      const nums: number[] = [1, 2, 3];
+      const result = greet("world");
+      console.log(result);
+      console.log(cfg.port);
+      console.log(nums.length);
+    `);
+    const result = await exec("node typed.ts");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    const lines = result.stdout.trim().split("\n");
+    expect(lines[0]).toBe("hello world");
+    expect(lines[1]).toBe("3000");
+    expect(lines[2]).toBe("3");
+  });
+
+  it("node handles ESM import/export syntax", async () => {
+    await writeFile("esm-lib.js", `
+      export function add(a, b) { return a + b; }
+      export const PI = 3.14;
+    `);
+    await writeFile("esm-main.js", `
+      import { add, PI } from "./esm-lib";
+      console.log(add(1, 2));
+      console.log(PI);
+    `);
+    const result = await exec("node esm-main.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    const lines = result.stdout.trim().split("\n");
+    expect(lines[0]).toBe("3");
+    expect(lines[1]).toBe("3.14");
+  });
+
+  it("node handles ESM default export", async () => {
+    await writeFile("esm-default.js", `
+      export default function greet(name) { return "hi " + name; }
+    `);
+    await writeFile("esm-use-default.js", `
+      import greet from "./esm-default";
+      console.log(greet("world"));
+    `);
+    const result = await exec("node esm-use-default.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("hi world");
+  });
+
+  it("npx resolves bin from node_modules", async () => {
+    // Set up a fake package with a bin entry
+    await exec("mkdir -p node_modules/hello-cli");
+    await writeFile("node_modules/hello-cli/index.js", 'console.log("hello from cli");');
+    await writeFile("node_modules/hello-cli/package.json", JSON.stringify({
+      name: "hello-cli",
+      bin: "./index.js",
+    }));
+    const result = await exec("npx hello-cli");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("hello from cli");
+  });
+
+  it("node handles circular require", async () => {
+    await writeFile("circ-a.js", `
+      exports.name = "a";
+      const b = require("./circ-b");
+      exports.bName = b.name;
+    `);
+    await writeFile("circ-b.js", `
+      exports.name = "b";
+      const a = require("./circ-a");
+      exports.aName = a.name;
+    `);
+    await writeFile("circ-main.js", `
+      const a = require("./circ-a");
+      const b = require("./circ-b");
+      console.log(a.name, a.bName, b.name, b.aName);
+    `);
+    const result = await exec("node circ-main.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    // a.name="a", a.bName="b", b.name="b", b.aName="a" (partial — Node.js circular behavior)
+    expect(result.stdout.trim()).toBe("a b b a");
+  });
+
+  it("node handles nested require chain (A requires B requires C)", async () => {
+    await writeFile("chain-c.js", 'module.exports = { val: 42 };');
+    await writeFile("chain-b.js", `
+      const c = require("./chain-c");
+      module.exports = { doubled: c.val * 2 };
+    `);
+    await writeFile("chain-a.js", `
+      const b = require("./chain-b");
+      console.log(b.doubled);
+    `);
+    const result = await exec("node chain-a.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("84");
+  });
+
+  it("npx returns error for missing command", async () => {
+    const result = await exec("npx nonexistent-pkg");
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("not found");
+  });
+
   it("invalid JSON returns 400 not 500", async () => {
     const res = await SELF.fetch(
       `http://localhost/workspace/${workspaceId}/exec`,
