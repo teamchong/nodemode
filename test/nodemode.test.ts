@@ -798,8 +798,7 @@ describe("nodemode", () => {
     expect(await exists("not-a-dir.txt")).toBe(false);
   });
 
-  it("500 errors do not leak internal details", async () => {
-    // Force an internal error by sending invalid JSON to a POST endpoint
+  it("invalid JSON returns 400 not 500", async () => {
     const res = await SELF.fetch(
       `http://localhost/workspace/${workspaceId}/exec`,
       {
@@ -808,11 +807,10 @@ describe("nodemode", () => {
         body: "not json at all",
       },
     );
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(400);
     const data = (await res.json()) as { error: string };
-    // Should NOT contain stack traces or internal details
-    expect(data.error).toBe("Internal server error");
+    expect(data.error).toBe("Invalid JSON in request body");
+    // Should NOT contain SyntaxError details or stack traces
     expect(data.error).not.toContain("SyntaxError");
-    expect(data.error).not.toContain("JSON");
   });
 });

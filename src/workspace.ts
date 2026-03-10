@@ -156,6 +156,9 @@ export class Workspace extends DurableObject<Env> {
       if (err instanceof ValidationError) {
         return json({ error: err.message }, 400);
       }
+      if (err instanceof SyntaxError) {
+        return json({ error: "Invalid JSON in request body" }, 400);
+      }
       const msg = err instanceof Error ? err.message : "";
       if (isFsError(msg)) {
         return json({ error: msg }, 400);
@@ -320,9 +323,8 @@ export class Workspace extends DurableObject<Env> {
       container.signal(15); // SIGTERM
       this.containerStatus = "sleeping";
       return json({ status: "stopping" });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return json({ error: msg }, 500);
+    } catch {
+      return json({ error: "Failed to stop container" }, 500);
     }
   }
 
@@ -416,6 +418,10 @@ export class Workspace extends DurableObject<Env> {
 
     if (!Array.isArray(body.paths)) {
       return json({ error: "paths must be an array" }, 400);
+    }
+
+    if (body.paths.length > 1000) {
+      return json({ error: "paths array exceeds maximum of 1000 entries" }, 400);
     }
 
     let refreshed = 0;
@@ -548,7 +554,9 @@ export class Workspace extends DurableObject<Env> {
         if (msg.cwd) validatePath(msg.cwd);
         result = await this.processes.exec(msg.command, { cwd: msg.cwd });
       } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
+        const errMsg = err instanceof ValidationError
+          ? err.message
+          : "Internal server error";
         try { ws.send(JSON.stringify({ type: "error", error: errMsg })); } catch { /* disconnected */ }
         return;
       }
