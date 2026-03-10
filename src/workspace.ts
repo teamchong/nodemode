@@ -25,6 +25,7 @@ import { validatePath, ValidationError } from "./validate";
 import { setContext } from "./shims/context";
 
 const MAX_TERMINAL_BUFFER_ROWS = 5000;
+const MAX_TERMINAL_ENTRY_BYTES = 64 * 1024; // Truncate large outputs before buffering
 const CONTAINER_HEALTH_INTERVAL_MS = 30_000;
 const CONTAINER_EXEC_TIMEOUT_MS = 300_000;
 
@@ -548,11 +549,11 @@ export class Workspace extends DurableObject<Env> {
         return;
       }
 
-      // Buffer output for hibernation persistence
+      // Buffer output for hibernation persistence (truncate large outputs)
       const now = Date.now();
       const ins = "INSERT INTO terminal_buffer (stream, data, timestamp) VALUES (?, ?, ?)";
-      if (result.stdout) this.sql.exec(ins, "stdout", result.stdout, now);
-      if (result.stderr) this.sql.exec(ins, "stderr", result.stderr, now);
+      if (result.stdout) this.sql.exec(ins, "stdout", result.stdout.slice(0, MAX_TERMINAL_ENTRY_BYTES), now);
+      if (result.stderr) this.sql.exec(ins, "stderr", result.stderr.slice(0, MAX_TERMINAL_ENTRY_BYTES), now);
       this.trimTerminalBuffer();
 
       try {

@@ -37,6 +37,7 @@ export interface ProcessHandle {
 // Commands handled entirely in-DO (no Container needed)
 const MAX_PROCESS_ROWS = 1000;
 const MAX_STORED_OUTPUT = 4096; // Truncate stdout/stderr stored in process table
+const MAX_PIPELINE_BYTES = 10 * 1024 * 1024; // 10MB cap on in-memory pipeline data
 const PRUNE_INTERVAL = 50; // Only check prune every N executions
 
 const BUILTIN_COMMANDS = new Set([
@@ -132,6 +133,9 @@ export class ProcessManager {
       input = lastResult.stdout;
       if (lastResult.stderr) allStderr.push(lastResult.stderr);
       if (lastResult.exitCode !== 0) break;
+      if (input.length > MAX_PIPELINE_BYTES) {
+        input = input.slice(0, MAX_PIPELINE_BYTES);
+      }
     }
 
     return { exitCode: lastResult.exitCode, stdout: lastResult.stdout, stderr: allStderr.join("") };
@@ -293,6 +297,7 @@ export class ProcessManager {
         return ok((parent || (args[0]?.startsWith("/") ? "/" : ".")) + "\n");
       }
       case "which":
+        if (!args[0]) return fail("which: missing argument\n");
         return BUILTIN_COMMANDS.has(args[0])
           ? ok(`/usr/bin/${args[0]}\n`)
           : fail(`which: ${args[0]}: not found\n`);
@@ -468,7 +473,11 @@ export class ProcessManager {
     }
 
     let test: (line: string) => boolean;
+    // Reject patterns with nested quantifiers that cause catastrophic backtracking (ReDoS)
+    // e.g. (a+)+, (a*)+, (a+)*, (a|b+)+ — group with quantifier containing inner quantifier
+    const isSafeRegex = !/\([^)]*[+*][^)]*\)[+*{]/.test(pattern) && pattern.length <= 1024;
     try {
+      if (!isSafeRegex) throw new Error("unsafe pattern");
       const regex = new RegExp(pattern, caseInsensitive ? "i" : "");
       test = (line) => regex.test(line);
     } catch {

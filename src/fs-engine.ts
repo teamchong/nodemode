@@ -163,8 +163,13 @@ export class FsEngine {
   async unlink(path: string): Promise<void> {
     const normalized = normalizePath(path);
     validatePath(normalized);
-    const key = this.r2Key(normalized);
 
+    const existing = this.stat(normalized);
+    if (existing?.isDirectory) {
+      throw new Error(`EISDIR: illegal operation on a directory '${path}'`);
+    }
+
+    const key = this.r2Key(normalized);
     await this.bucket.delete(key);
     this.sql.exec("DELETE FROM files WHERE path = ?", normalized);
     this.sql.exec("DELETE FROM file_cache WHERE path = ?", normalized);
@@ -366,6 +371,11 @@ export class FsEngine {
 
     const stat = this.stat(oldNorm);
     if (!stat) throw new Error(`ENOENT: no such file '${oldPath}'`);
+
+    // Cannot rename a directory into itself
+    if (newNorm.startsWith(oldNorm + "/")) {
+      throw new Error(`EINVAL: cannot move '${oldPath}' to a subdirectory of itself`);
+    }
 
     // Remove destination if it exists (rename overwrites)
     const destStat = this.stat(newNorm);
