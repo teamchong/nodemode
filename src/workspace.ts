@@ -156,6 +156,10 @@ export class Workspace extends DurableObject<Env> {
       if (err instanceof ValidationError) {
         return json({ error: err.message }, 400);
       }
+      const msg = err instanceof Error ? err.message : "";
+      if (isFsError(msg)) {
+        return json({ error: msg }, 400);
+      }
       return json({ error: "Internal server error" }, 500);
     }
   }
@@ -625,4 +629,10 @@ function json(data: unknown, status: number = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+// Known filesystem error prefixes — safe to return to clients as 400
+const FS_ERROR_PREFIXES = ["EISDIR:", "ENOENT:", "EEXIST:", "ENOTEMPTY:", "EINVAL:"];
+function isFsError(msg: string): boolean {
+  return FS_ERROR_PREFIXES.some((p) => msg.startsWith(p));
 }

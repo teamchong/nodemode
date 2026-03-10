@@ -713,4 +713,71 @@ describe("nodemode", () => {
     expect(result.stdout).toContain("first");
     expect(result.stdout).toContain("second");
   });
+
+  // -- Security tests --
+
+  it("unlink rejects directory deletion via API", async () => {
+    await mkdir("unlink-dir-test");
+    await writeFile("unlink-dir-test/child.txt", "child");
+
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/fs/unlink`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: "unlink-dir-test" }),
+      },
+    );
+    // Should fail with EISDIR (400, not 500)
+    expect(res.status).toBe(400);
+    const data = (await res.json()) as { error: string };
+    expect(data.error).toContain("EISDIR");
+
+    // Directory and child should still exist
+    expect(await exists("unlink-dir-test")).toBe(true);
+    expect(await exists("unlink-dir-test/child.txt")).toBe(true);
+  });
+
+  it("rename rejects moving directory into itself", async () => {
+    await mkdir("rename-parent");
+    await writeFile("rename-parent/file.txt", "content");
+
+    const res = await rename("rename-parent", "rename-parent/child");
+    expect(res.status).toBe(400);
+    const data = (await res.json()) as { error: string };
+    expect(data.error).toContain("EINVAL");
+  });
+
+  it("grep handles potentially dangerous regex by falling back to literal", async () => {
+    await writeFile("redos.txt", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaab\nnormal line\n");
+
+    // Pattern with nested quantifier — should fall back to literal string match
+    const result = await exec("grep '(a+)+$' redos.txt");
+    // Should complete quickly (not hang) — whether it matches or not is fine
+    expect(result).toBeDefined();
+  });
+
+  it("which with no args returns error", async () => {
+    const result = await exec("which");
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("missing argument");
+  });
+
+  it("500 errors do not leak internal details", async () => {
+    // Force an internal error by sending invalid JSON to a POST endpoint
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/exec`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "not json at all",
+      },
+    );
+    expect(res.status).toBe(500);
+    const data = (await res.json()) as { error: string };
+    // Should NOT contain stack traces or internal details
+    expect(data.error).toBe("Internal server error");
+    expect(data.error).not.toContain("SyntaxError");
+    expect(data.error).not.toContain("JSON");
+  });
 });
