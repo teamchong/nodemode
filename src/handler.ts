@@ -19,6 +19,8 @@ const WORKSPACE_ROUTE = /^\/workspace\/([^/]+)\/(.+)$/;
 const API_ROUTE = /^\/api\/workspaces(?:\/([^/]+))?(?:\/(.*))?$/;
 
 export interface HandlerOptions {
+  /** Called before routing. Return a Response to reject, or void/undefined to allow. */
+  authenticate?: (request: Request, env: Env) => Response | void | Promise<Response | void>;
   fallback?: (request: Request, env: Env) => Response | Promise<Response>;
   cors?: boolean;
 }
@@ -35,7 +37,7 @@ function getWorkspace(env: Env, id: string): Fetchable {
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, x-action",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
   "Access-Control-Max-Age": "86400",
 };
 
@@ -59,7 +61,7 @@ function jsonError(message: string, status: number): Response {
 }
 
 export function createHandler(options: HandlerOptions = {}) {
-  const { fallback, cors = true } = options;
+  const { authenticate, fallback, cors = true } = options;
 
   const maybeCors = cors ? withCors : (r: Response) => r;
 
@@ -72,6 +74,12 @@ export function createHandler(options: HandlerOptions = {}) {
     }
 
     try {
+      // Auth check — runs before any routing
+      if (authenticate) {
+        const authResult = await authenticate(request, env);
+        if (authResult) return maybeCors(authResult);
+      }
+
       // Validate payload size for requests with body
       if (request.method === "POST" || request.method === "PUT") {
         validatePayloadSize(request.headers.get("content-length"));
@@ -132,8 +140,7 @@ export function createHandler(options: HandlerOptions = {}) {
       if (err instanceof ValidationError) {
         return maybeCors(jsonError(err.message, 400));
       }
-      const msg = err instanceof Error ? err.message : String(err);
-      return maybeCors(jsonError(msg, 500));
+      return maybeCors(jsonError("Internal server error", 500));
     }
   };
 }

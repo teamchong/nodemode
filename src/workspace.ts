@@ -109,7 +109,7 @@ export class Workspace extends DurableObject<Env> {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const action = request.headers.get("x-action") || url.pathname;
+    const action = url.pathname;
 
     // WebSocket upgrade for stdio streaming
     if (request.headers.get("Upgrade") === "websocket") {
@@ -155,8 +155,7 @@ export class Workspace extends DurableObject<Env> {
       if (err instanceof ValidationError) {
         return json({ error: err.message }, 400);
       }
-      const msg = err instanceof Error ? err.message : String(err);
-      return json({ error: msg }, 500);
+      return json({ error: "Internal server error" }, 500);
     }
   }
 
