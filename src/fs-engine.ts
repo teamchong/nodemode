@@ -33,9 +33,13 @@ const MAX_CACHE_ENTRIES = 500; // Evict oldest entries beyond this count
 export class FsEngine {
   constructor(
     private bucket: R2Bucket,
-    private sql: SqlStorage,
+    private _sql: SqlStorage,
     private workspace: string,
   ) {}
+
+  get sql(): SqlStorage {
+    return this._sql;
+  }
 
   // -- Read operations --
 

@@ -15,7 +15,9 @@
 //   4. node_modules       → walk up from cwd
 
 import type { FsEngine } from "./fs-engine";
-import type { ProcessManager } from "./process-manager";
+export interface CommandExecutor {
+  exec(command: string, options?: { cwd?: string; env?: Record<string, string> }): Promise<{ exitCode: number; stdout: string; stderr: string }>;
+}
 import type { UnsafeEval } from "./env";
 // Workers with nodejs_compat provide node:crypto with synchronous createHash
 // @ts-expect-error — node:crypto types not in @cloudflare/workers-types
@@ -41,7 +43,7 @@ export class JsRunner {
 
   constructor(
     private fs: FsEngine,
-    private pm: ProcessManager,
+    private pm: CommandExecutor,
     private cwd: string,
     private unsafeEval?: UnsafeEval,
   ) {}
@@ -250,8 +252,7 @@ export class JsRunner {
       return this.moduleCache.get(absPath)!;
     }
 
-    const sql = (this.fs as unknown as { sql: SqlStorage }).sql;
-    const rows = sql.exec("SELECT data FROM file_cache WHERE path = ?", absPath).toArray();
+    const rows = this.fs.sql.exec("SELECT data FROM file_cache WHERE path = ?", absPath).toArray();
     if (rows.length === 0) {
       throw new Error(`Cannot find module '${absPath}'`);
     }
@@ -428,7 +429,7 @@ export class JsRunner {
   // fs module backed by FsEngine — sync ops use SQLite, async ops use R2
   private buildFsModule(): Record<string, unknown> {
     const fsEngine = this.fs;
-    const sql = (fsEngine as unknown as { sql: SqlStorage }).sql;
+    const sql = fsEngine.sql;
 
     const existsSync = (p: string): boolean => fsEngine.exists(String(p));
 

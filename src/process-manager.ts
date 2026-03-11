@@ -42,6 +42,12 @@ export interface ProcessHandle {
 // Commands handled entirely in-DO (no Container needed)
 const MAX_PROCESS_ROWS = 1000;
 const MAX_STORED_OUTPUT = 4096; // Truncate stdout/stderr stored in process table
+const TRUNCATION_MARKER = "\n[truncated]";
+
+function truncateOutput(s: string): string {
+  if (s.length <= MAX_STORED_OUTPUT) return s;
+  return s.slice(0, MAX_STORED_OUTPUT - TRUNCATION_MARKER.length) + TRUNCATION_MARKER;
+}
 const MAX_PIPELINE_BYTES = 10 * 1024 * 1024; // 10MB cap on in-memory pipeline data
 const PRUNE_INTERVAL = 50; // Only check prune every N executions
 const NUMERIC_OPS = new Set(["-eq", "-ne", "-lt", "-le", "-gt", "-ge"]);
@@ -119,8 +125,8 @@ export class ProcessManager {
       this.sql.exec(
         "UPDATE processes SET status = 'done', exit_code = ?, stdout = ?, stderr = ?, finished_at = ? WHERE pid = ?",
         result.exitCode,
-        result.stdout.slice(0, MAX_STORED_OUTPUT),
-        result.stderr.slice(0, MAX_STORED_OUTPUT),
+        truncateOutput(result.stdout),
+        truncateOutput(result.stderr),
         Date.now(),
         pid,
       );
@@ -128,7 +134,7 @@ export class ProcessManager {
       const msg = err instanceof Error ? err.message : String(err);
       this.sql.exec(
         "UPDATE processes SET status = 'error', exit_code = 1, stderr = ?, finished_at = ? WHERE pid = ?",
-        msg.slice(0, MAX_STORED_OUTPUT),
+        truncateOutput(msg),
         Date.now(),
         pid,
       );
@@ -352,7 +358,7 @@ export class ProcessManager {
   listProcesses(): ProcessHandle[] {
     return this.sql
       .exec(
-        "SELECT pid, command, status, exit_code FROM processes ORDER BY pid DESC LIMIT 100",
+        "SELECT pid, command, status, exit_code, stdout, stderr FROM processes ORDER BY pid DESC LIMIT 100",
       )
       .toArray()
       .map((row) => ({
@@ -360,8 +366,8 @@ export class ProcessManager {
         command: row.command as string,
         status: row.status as ProcessHandle["status"],
         exitCode: row.exit_code as number | null,
-        stdout: "",
-        stderr: "",
+        stdout: (row.stdout as string) || "",
+        stderr: (row.stderr as string) || "",
       }));
   }
 

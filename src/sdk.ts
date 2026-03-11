@@ -137,6 +137,14 @@ export class NodeMode {
     return data.exists;
   }
 
+  async rmdir(path: string, recursive = false): Promise<void> {
+    await this.post("fs/rmdir", { path, recursive });
+  }
+
+  async chmod(path: string, mode: number): Promise<void> {
+    await this.post("fs/chmod", { path, mode });
+  }
+
   // -- Process --
 
   async listProcesses(): Promise<ProcessHandle[]> {

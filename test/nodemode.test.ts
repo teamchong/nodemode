@@ -17,6 +17,8 @@ describe("nodemode", () => {
     unlink,
     rename,
     mkdir,
+    rmdir,
+    chmod,
     listProcesses,
     getProcess,
   } = createHelpers(workspaceId);
@@ -127,6 +129,15 @@ describe("nodemode", () => {
   it("lists processes", async () => {
     const processes = await listProcesses();
     expect(processes.length).toBeGreaterThan(0);
+  });
+
+  it("listProcesses returns stdout and stderr", async () => {
+    await exec("echo list-output-check");
+    const processes = await listProcesses();
+    const found = processes.find((p) => p.command === "echo list-output-check");
+    expect(found).toBeDefined();
+    expect(found!.stdout).toBe("list-output-check\n");
+    expect(found!.stderr).toBe("");
   });
 
   it("lists workspaces via API", async () => {
@@ -241,6 +252,21 @@ describe("nodemode", () => {
       },
     );
     expect(res.status).toBe(400);
+  });
+
+  it("index-invalidate returns errors for invalid paths", async () => {
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/index-invalidate`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths: ["valid.txt", "../escape", "also-valid.txt"] }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { refreshed: number; errors?: string[] };
+    expect(data.errors).toBeDefined();
+    expect(data.errors).toContain("../escape");
   });
 
   // -- Builtin command tests --
@@ -565,6 +591,18 @@ describe("nodemode", () => {
     expect(res.status).toBe(404);
   });
 
+  it("truncates large process output with marker", async () => {
+    // Generate output > 4096 bytes (MAX_STORED_OUTPUT)
+    const longLine = "x".repeat(200);
+    const lines = Array.from({ length: 30 }, () => longLine).join("; echo ");
+    await exec(`echo ${lines}`);
+
+    const processes = await listProcesses();
+    const found = processes.find((p) => p.stdout.includes("[truncated]"));
+    expect(found).toBeDefined();
+    expect(found!.stdout.endsWith("[truncated]")).toBe(true);
+  });
+
   // -- Workspace init edge case --
 
   it("returns already_initialized on second init", async () => {
@@ -746,6 +784,35 @@ describe("nodemode", () => {
     expect(res.status).toBe(400);
     const data = (await res.json()) as { error: string };
     expect(data.error).toContain("EINVAL");
+  });
+
+  it("/fs/rmdir removes empty directory", async () => {
+    await mkdir("rmdir-empty-test");
+    const res = await rmdir("rmdir-empty-test");
+    expect(res.status).toBe(200);
+    expect(await exists("rmdir-empty-test")).toBe(false);
+  });
+
+  it("/fs/rmdir recursive removes directory tree", async () => {
+    await mkdir("rmdir-tree");
+    await writeFile("rmdir-tree/a.txt", "a");
+    await writeFile("rmdir-tree/b.txt", "b");
+    const res = await rmdir("rmdir-tree", true);
+    expect(res.status).toBe(200);
+    expect(await exists("rmdir-tree")).toBe(false);
+  });
+
+  it("/fs/rmdir on non-existent path returns error", async () => {
+    const res = await rmdir("no-such-dir-rmdir");
+    expect(res.status).toBe(400);
+  });
+
+  it("/fs/chmod sets file mode", async () => {
+    await writeFile("chmod-test.txt", "data");
+    const res = await chmod("chmod-test.txt", 0o755);
+    expect(res.status).toBe(200);
+    const s = await stat("chmod-test.txt");
+    expect(s.mode).toBe(0o755);
   });
 
   it("grep handles potentially dangerous regex by falling back to literal", async () => {
@@ -1317,6 +1384,63 @@ describe("nodemode", () => {
     expect(res.status).toBe(400);
     const data = (await res.json()) as { error: string };
     expect(data.error).toContain("empty");
+  });
+
+  it("/upload handles filenames with spaces and special characters", async () => {
+    const files: Record<string, string> = {
+      "upload special/file with spaces.txt": btoa("spaces work"),
+      "upload special/café.txt": btoa("unicode name"),
+    };
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/upload`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { uploaded: number };
+    expect(data.uploaded).toBe(2);
+
+    const r1 = await exec("cat 'upload special/file with spaces.txt'");
+    expect(r1.stdout).toBe("spaces work");
+    const r2 = await exec("cat 'upload special/café.txt'");
+    expect(r2.stdout).toBe("unicode name");
+  });
+
+  it("/upload rejects path traversal attempts", async () => {
+    const files: Record<string, string> = {
+      "../escape.txt": btoa("should fail"),
+    };
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/upload`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { uploaded: number; errors?: string[] };
+    expect(data.errors).toBeDefined();
+    expect(data.errors!.length).toBeGreaterThan(0);
+  });
+
+  it("streaming read returns file content", async () => {
+    const content = "streaming test content ".repeat(100);
+    await writeFile("stream-test.txt", content);
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/fs/read`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: "stream-test.txt", stream: true }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toBe(content);
   });
 
   // -- HTTP server handler wiring --

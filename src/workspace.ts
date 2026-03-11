@@ -140,6 +140,10 @@ export class Workspace extends DurableObject<Env> {
           return await this.handleFsRename(request);
         case "/fs/exists":
           return this.handleFsExists(request);
+        case "/fs/rmdir":
+          return await this.handleFsRmdir(request);
+        case "/fs/chmod":
+          return await this.handleFsChmod(request);
         case "/process/list":
           return json(this.processes.listProcesses());
         case "/process/get":
@@ -320,6 +324,26 @@ export class Workspace extends DurableObject<Env> {
   private handleFsExists(request: Request): Response {
     const path = getPathParam(request);
     return json({ exists: this.fs.exists(path) });
+  }
+
+  private async handleFsRmdir(request: Request): Promise<Response> {
+    const { path, recursive } = (await request.json()) as {
+      path: string;
+      recursive?: boolean;
+    };
+    validatePath(path);
+    await this.fs.rmdir(path, recursive ?? false);
+    return json({ ok: true });
+  }
+
+  private async handleFsChmod(request: Request): Promise<Response> {
+    const { path, mode } = (await request.json()) as {
+      path: string;
+      mode: number;
+    };
+    validatePath(path);
+    this.fs.chmod(path, mode);
+    return json({ ok: true });
   }
 
   private handleProcessGet(request: Request): Response {
@@ -544,7 +568,8 @@ export class Workspace extends DurableObject<Env> {
     }
 
     // Execute command via container-agent with timeout
-    const fetcher = container.getTcpPort(8080);
+    const port = Number(this.env.CONTAINER_PORT) || 8080;
+    const fetcher = container.getTcpPort(port);
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), CONTAINER_EXEC_TIMEOUT_MS);
@@ -593,6 +618,7 @@ export class Workspace extends DurableObject<Env> {
     }
 
     let refreshed = 0;
+    const errors: string[] = [];
     for (const rawPath of body.paths) {
       try {
         validatePath(rawPath);
@@ -607,7 +633,7 @@ export class Workspace extends DurableObject<Env> {
           this.removeFileIndex(path);
         }
       } catch {
-        // Skip invalid paths
+        errors.push(typeof rawPath === "string" ? rawPath : "(invalid)");
       }
     }
 
@@ -617,7 +643,7 @@ export class Workspace extends DurableObject<Env> {
       try { ws.send(msg); } catch { /* client disconnected */ }
     }
 
-    return json({ refreshed });
+    return json({ refreshed, ...(errors.length > 0 ? { errors } : {}) });
   }
 
   // -- Alarm: container health check + index reconciliation --
@@ -632,7 +658,8 @@ export class Workspace extends DurableObject<Env> {
     }
 
     try {
-      const fetcher = container.getTcpPort(8080);
+      const port = Number(this.env.CONTAINER_PORT) || 8080;
+      const fetcher = container.getTcpPort(port);
       const res = await fetcher.fetch("http://container/healthz");
       if (!res.ok) throw new Error("unhealthy");
     } catch {
@@ -732,6 +759,8 @@ export class Workspace extends DurableObject<Env> {
       // Buffer output for hibernation persistence (truncate large outputs)
       const now = Date.now();
       const ins = "INSERT INTO terminal_buffer (stream, data, timestamp) VALUES (?, ?, ?)";
+      const stdoutTruncated = result.stdout.length > MAX_TERMINAL_ENTRY_BYTES;
+      const stderrTruncated = result.stderr.length > MAX_TERMINAL_ENTRY_BYTES;
       if (result.stdout) this.sql.exec(ins, "stdout", result.stdout.slice(0, MAX_TERMINAL_ENTRY_BYTES), now);
       if (result.stderr) this.sql.exec(ins, "stderr", result.stderr.slice(0, MAX_TERMINAL_ENTRY_BYTES), now);
       this.trimTerminalBuffer();
@@ -742,6 +771,7 @@ export class Workspace extends DurableObject<Env> {
           exitCode: result.exitCode,
           stdout: result.stdout,
           stderr: result.stderr,
+          ...(stdoutTruncated || stderrTruncated ? { truncated: true } : {}),
         }));
       } catch { /* client disconnected */ }
 

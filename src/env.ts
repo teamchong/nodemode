@@ -18,4 +18,7 @@ export interface Env {
   R2_ENDPOINT?: string;
   R2_ACCESS_KEY?: string;
   R2_SECRET_KEY?: string;
+
+  // Optional: container agent port (default: 8080)
+  CONTAINER_PORT?: string;
 }

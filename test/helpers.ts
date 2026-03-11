@@ -28,6 +28,8 @@ export function createHelpers(workspace: string) {
     unlink: (path: string) => post(`${base}/fs/unlink`, { path }),
     rename: (oldPath: string, newPath: string) => post(`${base}/fs/rename`, { oldPath, newPath }),
     mkdir: (path: string) => post(`${base}/fs/mkdir`, { path, recursive: true }),
+    rmdir: (path: string, recursive = false) => post(`${base}/fs/rmdir`, { path, recursive }),
+    chmod: (path: string, mode: number) => post(`${base}/fs/chmod`, { path, mode }),
     statRaw: (path: string) => SELF.fetch(q("fs/stat", path)),
 
     async exec(command: string, opts?: { env?: Record<string, string> }) {
