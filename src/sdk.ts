@@ -43,6 +43,19 @@ export class NodeMode {
     return res.json() as Promise<T>;
   }
 
+  private async put<T>(action: string, body: unknown): Promise<T> {
+    const res = await this.fetchFn(this.url(action), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`nodemode ${action} failed (${res.status}): ${err}`);
+    }
+    return res.json() as Promise<T>;
+  }
+
   private async get<T>(action: string, params?: Record<string, string>): Promise<T> {
     const res = await this.fetchFn(this.url(action, params));
     if (!res.ok) {
@@ -56,6 +69,18 @@ export class NodeMode {
 
   async init(opts: { owner: string; name: string }): Promise<{ status: string }> {
     return this.post("init", opts);
+  }
+
+  // -- Env --
+
+  async setEnv(vars: Record<string, string>): Promise<Record<string, string>> {
+    const data = await this.put<{ env: Record<string, string> }>("env", { vars });
+    return data.env;
+  }
+
+  async getEnv(): Promise<Record<string, string>> {
+    const data = await this.get<{ env: Record<string, string> }>("env");
+    return data.env;
   }
 
   // -- Exec --
@@ -120,6 +145,32 @@ export class NodeMode {
 
   async getProcess(pid: number): Promise<ProcessHandle> {
     return this.get("process/get", { pid: String(pid) });
+  }
+
+  // -- Upload --
+
+  async upload(files: Record<string, string | Uint8Array>): Promise<{ uploaded: number; errors?: string[] }> {
+    // Convert all values to base64
+    const encoded: Record<string, string> = {};
+    for (const [path, content] of Object.entries(files)) {
+      if (typeof content === "string") {
+        encoded[path] = btoa(content);
+      } else {
+        encoded[path] = btoa(String.fromCharCode(...content));
+      }
+    }
+    return this.post("upload", { files: encoded });
+  }
+
+  // -- Serve --
+
+  async serve(entryPoint: string, env?: Record<string, string>): Promise<{ status: string; exitCode: number; stdout: string; stderr: string }> {
+    return this.post("serve", { entryPoint, env });
+  }
+
+  async request(path: string, init?: RequestInit): Promise<Response> {
+    const url = `${this.baseUrl}/workspace/${this.workspaceId}/request${path}`;
+    return this.fetchFn(url, init);
   }
 
   // -- Container --

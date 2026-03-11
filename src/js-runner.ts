@@ -37,6 +37,7 @@ const BUILTIN_MODULES = new Set([
 
 export class JsRunner {
   private moduleCache = new Map<string, Record<string, unknown>>();
+  private _activeHttpServer: HttpServer | null = null;
 
   constructor(
     private fs: FsEngine,
@@ -44,6 +45,59 @@ export class JsRunner {
     private cwd: string,
     private unsafeEval?: UnsafeEval,
   ) {}
+
+  // Returns the http.Server that called .listen(), if any.
+  // Used by Workspace to route incoming fetch() requests through user code.
+  get activeHttpServer(): HttpServer | null {
+    return this._activeHttpServer;
+  }
+
+  // Route a Workers Request through the user's http.Server handler.
+  // Returns null if no server is listening.
+  async handleHttpRequest(request: Request): Promise<Response | null> {
+    const server = this._activeHttpServer;
+    if (!server || !server.listening) return null;
+
+    const url = new URL(request.url);
+    const headers: Record<string, string> = {};
+    request.headers.forEach((v, k) => { headers[k] = v; });
+
+    const req = new HttpIncomingMessage({
+      method: request.method,
+      url: url.pathname + url.search,
+      headers,
+    });
+
+    // Feed request body as data events
+    if (request.body) {
+      const reader = request.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          req.emit("data", new TextDecoder().decode(value));
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    }
+    req.emit("end");
+
+    const res = new HttpServerResponse();
+
+    // Call the user's handler
+    server._handleRequest(req, res);
+
+    // Wait for res.end() if not already finished
+    if (!res.finished) {
+      await new Promise<void>((resolve) => res.on("finish", () => resolve()));
+    }
+
+    return new Response(res.getBody(), {
+      status: res.statusCode,
+      headers: res.getHeaders(),
+    });
+  }
 
   async run(
     entryPath: string,
@@ -276,9 +330,16 @@ export class JsRunner {
     const format = (...a: unknown[]): string =>
       a.map((v) => (typeof v === "string" ? v : JSON.stringify(v) ?? String(v))).join(" ");
 
+    const mergedEnv: Record<string, string> = {
+      PATH: "/usr/local/bin:/usr/bin:/bin",
+      HOME: "/home/nodemode",
+      NODE_ENV: "production",
+      ...ctx.env,
+    };
+
     const processShim = {
       argv: ctx.argv,
-      env: ctx.env,
+      env: mergedEnv,
       cwd: () => this.cwd,
       exit: (code?: number) => { throw new ExitSignal(code ?? 0); },
       stdout: { write: (s: string) => { ctx.stdout.push(s); return true; } },
@@ -357,7 +418,7 @@ export class JsRunner {
       case "buffer": return { Buffer: BufferShim };
       case "querystring": return buildQuerystringModule();
       case "http":
-      case "https": return buildHttpModule();
+      case "https": return buildHttpModule((srv) => { this._activeHttpServer = srv; });
       case "net": return buildNetModule();
       case "worker_threads": return this.buildWorkerThreadsModule(ctx);
       default: return null;
@@ -1136,26 +1197,73 @@ function buildStreamModule(): Record<string, unknown> {
 
   class PassThrough extends Transform {}
 
+  const finished = (stream: MiniEventEmitter, cb: (err?: Error) => void): (() => void) => {
+    let called = false;
+    const done = (err?: Error) => {
+      if (called) return;
+      called = true;
+      cb(err);
+    };
+    stream.once("end", () => done());
+    stream.once("finish", () => done());
+    stream.once("error", (e: unknown) => done(e as Error));
+    return () => {
+      // cleanup — prevent callback from firing
+      called = true;
+    };
+  };
+
   const pipeline = (...args: unknown[]) => {
     const cb = typeof args[args.length - 1] === "function" ? args.pop() as (err?: Error) => void : null;
-    try {
-      for (let i = 0; i < args.length - 1; i++) {
-        const src = args[i] as { pipe: (d: unknown) => unknown };
-        if (src.pipe) src.pipe(args[i + 1]);
+    const streams = args as Array<{ pipe?: (d: unknown) => unknown; destroy?: () => void; on?: (e: string, fn: (...a: unknown[]) => void) => void }>;
+    const destroyAll = (err: Error) => {
+      for (const s of streams) {
+        if (s && typeof s.destroy === "function") s.destroy();
       }
-      if (cb) cb();
+      if (cb) cb(err);
+    };
+    try {
+      for (let i = 0; i < streams.length; i++) {
+        const s = streams[i];
+        if (s && typeof s.on === "function") {
+          s.on("error", (e: unknown) => destroyAll(e as Error));
+        }
+        if (i < streams.length - 1 && s && typeof s.pipe === "function") {
+          s.pipe(streams[i + 1] as { write: (c: unknown) => void; end: () => void });
+        }
+      }
+      const last = streams[streams.length - 1];
+      if (last && typeof last.on === "function") {
+        let done = false;
+        const onDone = () => {
+          if (done) return;
+          done = true;
+          if (cb) cb(undefined);
+        };
+        last.on("finish", onDone);
+        last.on("end", onDone);
+      }
     } catch (err) {
       if (cb) cb(err as Error);
     }
   };
 
+  const promisePipeline = (...streams: unknown[]): Promise<void> => {
+    return new Promise<void>((resolve, reject) => {
+      pipeline(...streams, (err?: Error) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  };
+
+  const promises = { pipeline: promisePipeline };
+
   return {
     Readable, Writable, Transform, PassThrough,
     pipeline,
-    finished: (stream: MiniEventEmitter, cb: (err?: Error) => void) => {
-      stream.once("close", () => cb());
-      stream.once("error", (err: unknown) => cb(err as Error));
-    },
+    finished,
+    promises,
   };
 }
 
@@ -1218,98 +1326,99 @@ function buildQuerystringModule(): Record<string, unknown> {
   };
 }
 
-// http/https module — Server captures the request handler for DO fetch() integration.
-// In Workers, there is no TCP listener. Instead, Server.listen() marks the server as
-// ready, and _handleRequest() is called by the DO's fetch() handler to route incoming
-// HTTP requests through the user's Node.js-style (req, res) handler.
-function buildHttpModule(): Record<string, unknown> {
-  class IncomingMessage extends MiniEventEmitter {
-    headers: Record<string, string> = {};
-    method = "GET";
-    url = "/";
-    statusCode = 200;
-    httpVersion = "1.1";
-    constructor(init?: { method?: string; url?: string; headers?: Record<string, string> }) {
-      super();
-      if (init) {
-        this.method = init.method ?? "GET";
-        this.url = init.url ?? "/";
-        this.headers = init.headers ?? {};
-      }
+// Module-level HTTP classes — shared between buildHttpModule() and JsRunner.handleHttpRequest()
+class HttpIncomingMessage extends MiniEventEmitter {
+  headers: Record<string, string> = {};
+  method = "GET";
+  url = "/";
+  statusCode = 200;
+  httpVersion = "1.1";
+  constructor(init?: { method?: string; url?: string; headers?: Record<string, string> }) {
+    super();
+    if (init) {
+      this.method = init.method ?? "GET";
+      this.url = init.url ?? "/";
+      this.headers = init.headers ?? {};
     }
   }
+}
 
-  class ServerResponse extends MiniEventEmitter {
-    statusCode = 200;
-    private _headers: Record<string, string> = {};
-    private _body: string[] = [];
-    headersSent = false;
-    finished = false;
+class HttpServerResponse extends MiniEventEmitter {
+  statusCode = 200;
+  private _headers: Record<string, string> = {};
+  private _body: string[] = [];
+  headersSent = false;
+  finished = false;
 
-    setHeader(name: string, value: string) { this._headers[name.toLowerCase()] = value; return this; }
-    getHeader(name: string) { return this._headers[name.toLowerCase()]; }
-    removeHeader(name: string) { delete this._headers[name.toLowerCase()]; }
-    writeHead(code: number, headers?: Record<string, string>) {
-      this.statusCode = code;
-      if (headers) for (const [k, v] of Object.entries(headers)) this._headers[k.toLowerCase()] = v;
-      this.headersSent = true;
-      return this;
-    }
-    write(chunk: string) { this._body.push(chunk); return true; }
-    end(data?: string) {
-      if (data) this._body.push(data);
-      this.finished = true;
-      this.emit("finish");
-    }
-    getBody() { return this._body.join(""); }
-    getHeaders() { return { ...this._headers }; }
+  setHeader(name: string, value: string) { this._headers[name.toLowerCase()] = value; return this; }
+  getHeader(name: string) { return this._headers[name.toLowerCase()]; }
+  removeHeader(name: string) { delete this._headers[name.toLowerCase()]; }
+  writeHead(code: number, headers?: Record<string, string>) {
+    this.statusCode = code;
+    if (headers) for (const [k, v] of Object.entries(headers)) this._headers[k.toLowerCase()] = v;
+    this.headersSent = true;
+    return this;
+  }
+  write(chunk: string) { this._body.push(chunk); return true; }
+  end(data?: string) {
+    if (data) this._body.push(data);
+    this.finished = true;
+    this.emit("finish");
+  }
+  getBody() { return this._body.join(""); }
+  getHeaders() { return { ...this._headers }; }
+}
+
+class HttpServer extends MiniEventEmitter {
+  private _handler: ((req: HttpIncomingMessage, res: HttpServerResponse) => void) | null = null;
+  private _port = 0;
+  private _onListen: ((srv: HttpServer) => void) | null = null;
+  listening = false;
+
+  constructor(handler?: (req: HttpIncomingMessage, res: HttpServerResponse) => void, onListen?: (srv: HttpServer) => void) {
+    super();
+    if (handler) this._handler = handler;
+    this._onListen = onListen ?? null;
   }
 
-  class Server extends MiniEventEmitter {
-    private _handler: ((req: IncomingMessage, res: ServerResponse) => void) | null = null;
-    private _port = 0;
-    listening = false;
-
-    constructor(handler?: (req: IncomingMessage, res: ServerResponse) => void) {
-      super();
-      if (handler) this._handler = handler;
-    }
-
-    // In Workers there is no TCP bind — listen() signals readiness and invokes the callback.
-    // The actual request routing happens via _handleRequest() called from the DO's fetch().
-    listen(port?: number, _host?: string | (() => void), cb?: () => void) {
-      this._port = port ?? 0;
-      this.listening = true;
-      const callback = typeof _host === "function" ? _host : cb;
-      if (callback) queueMicrotask(callback);
-      this.emit("listening");
-      return this;
-    }
-
-    close(cb?: () => void) {
-      this.listening = false;
-      if (cb) queueMicrotask(cb);
-      this.emit("close");
-      return this;
-    }
-
-    address() { return { address: "0.0.0.0", family: "IPv4", port: this._port }; }
-
-    // Called by the DO's fetch() handler to route a Workers Request through
-    // the user's Node.js-style (req, res) handler and produce a Response.
-    _handleRequest(req: IncomingMessage, res: ServerResponse) {
-      if (this._handler) this._handler(req, res);
-      else this.emit("request", req, res);
-    }
+  // In Workers there is no TCP bind — listen() signals readiness and registers
+  // the server with JsRunner so the DO's fetch() can route requests through it.
+  listen(port?: number, _host?: string | (() => void), cb?: () => void) {
+    this._port = port ?? 0;
+    this.listening = true;
+    if (this._onListen) this._onListen(this);
+    const callback = typeof _host === "function" ? _host : cb;
+    if (callback) queueMicrotask(callback);
+    this.emit("listening");
+    return this;
   }
 
-  const createServer = (handler?: (req: IncomingMessage, res: ServerResponse) => void) => new Server(handler);
+  close(cb?: () => void) {
+    this.listening = false;
+    if (cb) queueMicrotask(cb);
+    this.emit("close");
+    return this;
+  }
 
-  const request = (_opts: unknown, cb?: (res: IncomingMessage) => void) => {
+  address() { return { address: "0.0.0.0", family: "IPv4", port: this._port }; }
+
+  // Called by the DO's fetch() handler to route a Workers Request through
+  // the user's Node.js-style (req, res) handler and produce a Response.
+  _handleRequest(req: HttpIncomingMessage, res: HttpServerResponse) {
+    if (this._handler) this._handler(req, res);
+    else this.emit("request", req, res);
+  }
+}
+
+function buildHttpModule(onServerListen?: (server: HttpServer) => void): Record<string, unknown> {
+  const createServer = (handler?: (req: HttpIncomingMessage, res: HttpServerResponse) => void) =>
+    new HttpServer(handler, onServerListen);
+
+  const request = (_opts: unknown, cb?: (res: HttpIncomingMessage) => void) => {
     const req = new MiniEventEmitter() as MiniEventEmitter & { end: () => void; write: () => MiniEventEmitter };
     req.end = () => {
       if (cb) {
-        const res = new IncomingMessage();
+        const res = new HttpIncomingMessage();
         queueMicrotask(() => cb(res));
       }
     };
@@ -1317,7 +1426,7 @@ function buildHttpModule(): Record<string, unknown> {
     return req;
   };
 
-  const get = (opts: unknown, cb?: (res: IncomingMessage) => void) => {
+  const get = (opts: unknown, cb?: (res: HttpIncomingMessage) => void) => {
     const req = request(opts, cb);
     req.end();
     return req;
@@ -1325,9 +1434,9 @@ function buildHttpModule(): Record<string, unknown> {
 
   return {
     createServer,
-    Server,
-    IncomingMessage,
-    ServerResponse,
+    Server: HttpServer,
+    IncomingMessage: HttpIncomingMessage,
+    ServerResponse: HttpServerResponse,
     request,
     get,
     STATUS_CODES: { 200: "OK", 201: "Created", 204: "No Content", 301: "Moved Permanently", 302: "Found", 304: "Not Modified", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 500: "Internal Server Error" },

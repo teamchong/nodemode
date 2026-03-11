@@ -15,14 +15,17 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const templateDir = join(__dirname, "template");
 
-const [, , command] = process.argv;
+const [, , command, ...args] = process.argv;
 
 switch (command) {
   case "init":
     init();
     break;
   case "deploy":
-    deploy();
+    await deploy();
+    break;
+  case "analyze":
+    await analyze();
     break;
   case "help":
   case "--help":
@@ -40,15 +43,20 @@ function usage() {
 nodemode — Node.js runtime on Cloudflare Workers
 
 Commands:
-  init      Scaffold a nodemode Worker project in the current directory
-  deploy    Build and deploy to Cloudflare Workers
+  init                Scaffold a nodemode Worker project in the current directory
+  analyze [dir]       Analyze a project for Workers compatibility issues
+  deploy [dir]        Transform, build, and deploy to Cloudflare Workers
+    --output <dir>    Output directory for transformed files (default: .nodemode-build)
+    --dry-run         Show analysis without transforming or deploying
 
 Options:
-  --help    Show this help message
+  --help              Show this help message
 
 Examples:
   npx nodemode init
+  npx nodemode analyze ./my-app
   npx nodemode deploy
+  npx nodemode deploy ./my-app --dry-run
 `);
 }
 
@@ -119,19 +127,91 @@ Done! Next steps:
 `);
 }
 
-function deploy() {
-  const cwd = process.cwd();
+async function analyze() {
+  const { analyzeProject } = await import("../src/deploy.ts");
+  const projectDir = resolve(args[0] || ".");
 
-  if (!existsSync(join(cwd, "wrangler.jsonc")) && !existsSync(join(cwd, "wrangler.toml"))) {
-    console.error("No wrangler.jsonc found. Run `npx nodemode init` first.");
-    process.exit(1);
+  console.log(`Analyzing ${projectDir}...\n`);
+
+  const result = await analyzeProject(projectDir);
+
+  if (result.entryPoint) {
+    console.log(`  Entry point: ${result.entryPoint}`);
+  }
+  console.log(`  Dependencies: ${result.dependencies.length}`);
+  console.log(`  Issues found: ${result.issues.length}\n`);
+
+  for (const issue of result.issues) {
+    const fixLabel = issue.autoFix ? " [auto-fix]" : " [manual]";
+    console.log(`  ${issue.kind}${fixLabel}`);
+    console.log(`    ${issue.file}:${issue.line} — ${issue.message}`);
   }
 
-  console.log("Deploying nodemode to Cloudflare Workers...\n");
+  if (result.issues.length === 0) {
+    console.log("  No compatibility issues found.");
+  }
+}
 
-  try {
-    execSync("npx wrangler deploy", { cwd, stdio: "inherit" });
-  } catch {
-    process.exit(1);
+async function deploy() {
+  const projectDir = resolve(args.find(a => !a.startsWith("-")) || ".");
+  const dryRun = args.includes("--dry-run");
+  const outputIdx = args.indexOf("--output");
+  const outputDir = outputIdx >= 0 && args[outputIdx + 1]
+    ? resolve(args[outputIdx + 1])
+    : join(projectDir, ".nodemode-build");
+
+  // Run analysis
+  const { analyzeProject, deployProject } = await import("../src/deploy.ts");
+  console.log(`Analyzing ${projectDir}...\n`);
+
+  const analysis = await analyzeProject(projectDir);
+
+  if (analysis.entryPoint) {
+    console.log(`  Entry point: ${analysis.entryPoint}`);
+  }
+  console.log(`  Dependencies: ${analysis.dependencies.length}`);
+  console.log(`  Issues found: ${analysis.issues.length}`);
+
+  const autoFixable = analysis.issues.filter(i => i.autoFix);
+  const manual = analysis.issues.filter(i => !i.autoFix);
+
+  if (autoFixable.length > 0) {
+    console.log(`\n  Auto-fixable (${autoFixable.length}):`);
+    for (const issue of autoFixable) {
+      console.log(`    ${issue.kind}: ${issue.message}`);
+    }
+  }
+
+  if (manual.length > 0) {
+    console.log(`\n  Manual review (${manual.length}):`);
+    for (const issue of manual) {
+      console.log(`    ${issue.kind} ${issue.file}:${issue.line} — ${issue.message}`);
+    }
+  }
+
+  if (dryRun) {
+    console.log("\n  --dry-run: no files written.");
+    return;
+  }
+
+  // Transform and write output
+  console.log(`\n  Transforming to ${outputDir}...`);
+  await deployProject(projectDir, outputDir);
+  console.log(`  Done. ${autoFixable.length} auto-fixes applied.\n`);
+
+  // Deploy with wrangler if wrangler config exists
+  const hasWrangler = existsSync(join(projectDir, "wrangler.jsonc"))
+    || existsSync(join(projectDir, "wrangler.toml"));
+
+  if (hasWrangler) {
+    console.log("Deploying to Cloudflare Workers...\n");
+    try {
+      execSync("npx wrangler deploy", { cwd: projectDir, stdio: "inherit" });
+    } catch {
+      process.exit(1);
+    }
+  } else {
+    console.log("No wrangler.jsonc found — skipping wrangler deploy.");
+    console.log("To deploy, run: npx wrangler deploy");
   }
 }

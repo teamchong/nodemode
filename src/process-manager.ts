@@ -80,6 +80,7 @@ type ContainerExecFn = (
 
 export class ProcessManager {
   private execCount = 0;
+  private _runner: JsRunner | null = null;
 
   constructor(
     private sql: SqlStorage,
@@ -88,6 +89,16 @@ export class ProcessManager {
     private containerExec?: ContainerExecFn,
     private unsafeEval?: UnsafeEval,
   ) {}
+
+  // Returns the persistent JsRunner instance (created on first use).
+  // Keeps the active http.Server across exec calls so Workspace can
+  // route incoming fetch() requests through user code.
+  get runner(): JsRunner {
+    if (!this._runner) {
+      this._runner = new JsRunner(this.fs, this, this.cwd, this.unsafeEval);
+    }
+    return this._runner;
+  }
 
   async exec(command: string, options: SpawnOptions = {}): Promise<SpawnResult> {
     validateCommand(command);
@@ -208,7 +219,7 @@ export class ProcessManager {
     cwd: string,
     options: SpawnOptions,
   ): Promise<SpawnResult | null> {
-    const runner = new JsRunner(this.fs, this, cwd, this.unsafeEval);
+    const runner = this.runner;
 
     // `node script.js [args...]`
     if (cmd === "node" && args.length > 0 && !args[0].startsWith("-")) {
@@ -268,9 +279,13 @@ export class ProcessManager {
   }
 
   private async resolveNpxBin(name: string, cwd: string): Promise<string | null> {
-    // 1. Check node_modules/.bin/{name} — typically a JS file
     const cwdPrefix = cwd === "/" ? "" : cwd.replace(/^\/+/, "").replace(/\/+$/, "");
-    const binPath = cwdPrefix ? `${cwdPrefix}/node_modules/.bin/${name}` : `node_modules/.bin/${name}`;
+
+    // For .bin lookup, use the short name (last segment for scoped packages)
+    const shortName = name.startsWith("@") ? name.split("/").pop()! : name;
+
+    // 1. Check node_modules/.bin/{shortName} — typically a JS file
+    const binPath = cwdPrefix ? `${cwdPrefix}/node_modules/.bin/${shortName}` : `node_modules/.bin/${shortName}`;
     if (this.fs.exists(binPath)) {
       return "./" + binPath;
     }
@@ -284,8 +299,9 @@ export class ProcessManager {
         let entry: string | undefined;
         if (typeof pkg.bin === "string") {
           entry = pkg.bin;
-        } else if (typeof pkg.bin === "object" && pkg.bin[name]) {
-          entry = pkg.bin[name];
+        } else if (typeof pkg.bin === "object") {
+          // Try the short name first (handles scoped packages: @scope/pkg → pkg)
+          entry = pkg.bin[shortName] ?? pkg.bin[name];
         }
         if (!entry) entry = pkg.main;
         if (entry) {

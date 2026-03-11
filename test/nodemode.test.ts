@@ -1155,6 +1155,214 @@ describe("nodemode", () => {
     expect(lines[2]).toBe("true");
   });
 
+  it("npx resolves scoped package bin", async () => {
+    await init();
+    await writeFile(
+      "node_modules/@myorg/tool/package.json",
+      JSON.stringify({ name: "@myorg/tool", bin: { tool: "./cli.js" } }),
+    );
+    await writeFile("node_modules/@myorg/tool/cli.js", 'console.log("scoped-tool");');
+    const result = await exec("npx @myorg/tool");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("scoped-tool");
+  });
+
+  it("npx resolves multi-bin package by name", async () => {
+    await init();
+    await writeFile(
+      "node_modules/multi/package.json",
+      JSON.stringify({
+        name: "multi",
+        bin: { multi: "./main.js", helper: "./help.js" },
+      }),
+    );
+    await writeFile("node_modules/multi/main.js", 'console.log("multi-main");');
+    await writeFile("node_modules/multi/help.js", 'console.log("multi-help");');
+    const result = await exec("npx multi");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("multi-main");
+  });
+
+  it("stream.pipeline chains readable to writable", async () => {
+    await writeFile("pipeline-test.js", `
+      const stream = require("stream");
+      const chunks = [];
+      const src = new stream.Readable();
+      src._read = function() {};
+      const dest = new stream.Writable();
+      dest.write = function(chunk) { chunks.push(chunk); return true; };
+      dest.end = function() {
+        dest.writable = false;
+        dest.emit("finish");
+        dest.emit("close");
+      };
+      stream.pipeline(src, dest, (err) => {
+        if (err) { console.log("error:" + err.message); }
+        else { console.log("result:" + chunks.join("")); }
+      });
+      src.emit("data", "hello ");
+      src.emit("data", "world");
+      src.emit("end");
+    `);
+    const result = await exec("node pipeline-test.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("result:hello world");
+  });
+
+  it("stream.finished fires on stream end", async () => {
+    await writeFile("finished-test.js", `
+      const stream = require("stream");
+      const src = new stream.Readable();
+      src._read = function() {};
+      const cleanup = stream.finished(src, (err) => {
+        if (err) { console.log("error:" + err.message); }
+        else { console.log("finished:ok"); }
+      });
+      console.log("cleanup:" + typeof cleanup);
+      src.emit("end");
+    `);
+    const result = await exec("node finished-test.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    const lines = result.stdout.trim().split("\n");
+    expect(lines[0]).toBe("cleanup:function");
+    expect(lines[1]).toBe("finished:ok");
+  });
+
+  // -- Workspace env vars --
+
+  it("workspace env vars are accessible in process.env", async () => {
+    // Set env via PUT /env
+    const setRes = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/env`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ vars: { MY_VAR: "hello_from_env" } }),
+      },
+    );
+    expect(setRes.status).toBe(200);
+
+    // Verify via GET /env
+    const getRes = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/env`,
+    );
+    expect(getRes.status).toBe(200);
+    const getData = (await getRes.json()) as { env: Record<string, string> };
+    expect(getData.env.MY_VAR).toBe("hello_from_env");
+
+    // Run node code that reads process.env.MY_VAR
+    const result = await exec('node -e "console.log(process.env.MY_VAR)"');
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("hello_from_env");
+  });
+
+  it("exec env overrides workspace env", async () => {
+    // Set workspace env MY_VAR=default
+    await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/env`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ vars: { MY_VAR: "default" } }),
+      },
+    );
+
+    // Exec with env override
+    const result = await exec('node -e "console.log(process.env.MY_VAR)"', {
+      env: { MY_VAR: "override" },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("override");
+  });
+
+  // -- Bulk upload --
+
+  it("/upload writes multiple files and they are readable", async () => {
+    const files = {
+      "upload-test/a.txt": btoa("file-a-content"),
+      "upload-test/sub/b.txt": btoa("file-b-content"),
+    };
+
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/upload`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { uploaded: number };
+    expect(data.uploaded).toBe(2);
+
+    // Verify files are readable
+    const result = await exec("cat upload-test/a.txt");
+    expect(result.stdout).toBe("file-a-content");
+
+    const result2 = await exec("cat upload-test/sub/b.txt");
+    expect(result2.stdout).toBe("file-b-content");
+  });
+
+  it("/upload returns error for empty files object", async () => {
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/upload`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files: {} }),
+      },
+    );
+    expect(res.status).toBe(400);
+    const data = (await res.json()) as { error: string };
+    expect(data.error).toContain("empty");
+  });
+
+  // -- HTTP server handler wiring --
+
+  it("/request returns 400 when no server is listening", async () => {
+    const res = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/request`,
+      { method: "POST" },
+    );
+    expect(res.status).toBe(400);
+    const data = (await res.json()) as { error: string };
+    expect(data.error).toContain("No HTTP server is listening");
+  });
+
+  it("/serve starts an http server and /request proxies through it", async () => {
+    await writeFile("http-app.js", `
+      const http = require("http");
+      const server = http.createServer((req, res) => {
+        res.writeHead(200, { "X-App": "nodemode" });
+        res.end("Hello from " + req.method + " " + req.url);
+      });
+      server.listen(8080);
+    `);
+
+    const serveRes = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/serve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entryPoint: "./http-app.js" }),
+      },
+    );
+    expect(serveRes.status).toBe(200);
+    const serveData = (await serveRes.json()) as { status: string };
+    expect(serveData.status).toBe("serving");
+
+    const reqRes = await SELF.fetch(
+      `http://localhost/workspace/${workspaceId}/request/hello`,
+      { method: "GET" },
+    );
+    expect(reqRes.status).toBe(200);
+    const body = await reqRes.text();
+    expect(body).toBe("Hello from GET /hello");
+    expect(reqRes.headers.get("x-app")).toBe("nodemode");
+  });
+
   it("invalid JSON returns 400 not 500", async () => {
     const res = await SELF.fetch(
       `http://localhost/workspace/${workspaceId}/exec`,

@@ -148,9 +148,20 @@ export class Workspace extends DurableObject<Env> {
           return json({ status: this.containerStatus });
         case "/container/stop":
           return await this.handleContainerStop();
+        case "/env":
+          if (request.method === "PUT") return await this.handleSetEnv(request);
+          return this.handleGetEnv();
+        case "/serve":
+          return await this.handleServe(request);
+        case "/upload":
+          return await this.handleUpload(request);
         case "/index-invalidate":
           return await this.handleIndexInvalidate(request);
         default:
+          // /request/* routes through the user's http.Server handler
+          if (action === "/request" || action.startsWith("/request/")) {
+            return await this.handleHttpProxy(request);
+          }
           return json({ error: "Not found" }, 404);
       }
     } catch (err) {
@@ -208,9 +219,18 @@ export class Workspace extends DurableObject<Env> {
 
     if (body.cwd) validatePath(body.cwd);
 
+    // Merge workspace-level env with per-request env (request wins)
+    const rows = this.sql
+      .exec("SELECT env FROM workspace_meta WHERE id = 1")
+      .toArray();
+    const workspaceEnv: Record<string, string> = rows.length > 0
+      ? JSON.parse(rows[0].env as string)
+      : {};
+    const mergedEnv = { ...workspaceEnv, ...body.env };
+
     const result = await this.processes.exec(body.command, {
       cwd: body.cwd,
-      env: body.env,
+      env: mergedEnv,
     });
 
     return json(result);
@@ -308,6 +328,153 @@ export class Workspace extends DurableObject<Env> {
     const proc = this.processes.getProcess(pid);
     if (!proc) return json({ error: "Process not found" }, 404);
     return json(proc);
+  }
+
+  // -- Env --
+
+  private async handleSetEnv(request: Request): Promise<Response> {
+    const body = (await request.json()) as { vars: Record<string, string> };
+    if (!body.vars || typeof body.vars !== "object") {
+      return json({ error: "vars must be an object" }, 400);
+    }
+
+    // Read existing env, merge new vars on top
+    const rows = this.sql
+      .exec("SELECT env FROM workspace_meta WHERE id = 1")
+      .toArray();
+    const existing: Record<string, string> = rows.length > 0
+      ? JSON.parse(rows[0].env as string)
+      : {};
+    const merged = { ...existing, ...body.vars };
+
+    this.sql.exec(
+      "UPDATE workspace_meta SET env = ? WHERE id = 1",
+      JSON.stringify(merged),
+    );
+
+    return json({ env: merged });
+  }
+
+  private handleGetEnv(): Response {
+    const rows = this.sql
+      .exec("SELECT env FROM workspace_meta WHERE id = 1")
+      .toArray();
+    const env: Record<string, string> = rows.length > 0
+      ? JSON.parse(rows[0].env as string)
+      : {};
+    return json({ env });
+  }
+
+  // -- HTTP server handler --
+
+  // -- Bulk upload --
+
+  // POST /upload — write multiple files to the workspace in a single request.
+  // Body: { files: { "path": "base64content", ... } }
+  // Files are written to R2 in parallel and indexed in SQLite.
+  private async handleUpload(request: Request): Promise<Response> {
+    const body = (await request.json()) as {
+      files: Record<string, string>;
+    };
+
+    if (!body.files || typeof body.files !== "object") {
+      return json({ error: "files object is required" }, 400);
+    }
+
+    const entries = Object.entries(body.files);
+    if (entries.length === 0) {
+      return json({ error: "files object is empty" }, 400);
+    }
+    if (entries.length > 5000) {
+      return json({ error: "Too many files (max 5000 per upload)" }, 400);
+    }
+
+    let uploaded = 0;
+    const errors: string[] = [];
+
+    // Write files in parallel batches (up to 50 concurrent R2 puts)
+    const BATCH_SIZE = 50;
+    for (let i = 0; i < entries.length; i += BATCH_SIZE) {
+      const batch = entries.slice(i, i + BATCH_SIZE);
+      const results = await Promise.allSettled(
+        batch.map(async ([path, b64Content]) => {
+          try {
+            validatePath(path);
+          } catch {
+            errors.push(`Invalid path: ${path}`);
+            return;
+          }
+          const normalized = normalizePath(path);
+          if (!normalized) {
+            errors.push(`Invalid path: ${path}`);
+            return;
+          }
+          const data = Uint8Array.from(atob(b64Content), (c) => c.charCodeAt(0));
+          await this.fs.writeFile(normalized, data);
+          uploaded++;
+        }),
+      );
+      for (const r of results) {
+        if (r.status === "rejected") {
+          errors.push(r.reason instanceof Error ? r.reason.message : String(r.reason));
+        }
+      }
+    }
+
+    return json({ uploaded, errors: errors.length > 0 ? errors : undefined });
+  }
+
+  // POST /serve — run a user's Node.js entry point that calls http.createServer().listen()
+  // After execution, the server's request handler is captured and subsequent
+  // /request calls are routed through it.
+  private async handleServe(request: Request): Promise<Response> {
+    const body = (await request.json()) as { entryPoint: string; env?: Record<string, string> };
+    if (!body.entryPoint) {
+      return json({ error: "entryPoint is required" }, 400);
+    }
+
+    const runner = this.processes.runner;
+    const env = body.env ?? {};
+
+    // Merge workspace env vars
+    const rows = this.sql.exec("SELECT env FROM workspace_meta WHERE id = 1").toArray();
+    if (rows.length > 0 && rows[0].env) {
+      const wsEnv = JSON.parse(rows[0].env as string) as Record<string, string>;
+      for (const [k, v] of Object.entries(wsEnv)) {
+        if (!(k in env)) env[k] = v;
+      }
+    }
+
+    const result = await runner.run(body.entryPoint, [], env);
+
+    const hasServer = runner.activeHttpServer !== null && runner.activeHttpServer.listening;
+
+    return json({
+      status: hasServer ? "serving" : "exited",
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    });
+  }
+
+  // /request/* — proxy an HTTP request through the user's http.Server handler.
+  // The path after /request becomes the user's request URL:
+  //   /request/api/users?limit=10 → req.url = "/api/users?limit=10"
+  //   /request                    → req.url = "/"
+  private async handleHttpProxy(request: Request): Promise<Response> {
+    const runner = this.processes.runner;
+
+    // Strip /request prefix to get the user's URL path
+    const url = new URL(request.url);
+    const userPath = url.pathname.replace(/^\/request/, "") || "/";
+    const userUrl = new URL(userPath + url.search, request.url);
+    const proxied = new Request(userUrl, request);
+
+    const response = await runner.handleHttpRequest(proxied);
+    if (!response) {
+      return json({ error: "No HTTP server is listening. Call /serve first." }, 400);
+    }
+    return response;
   }
 
   // -- Container lifecycle --
