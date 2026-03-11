@@ -1061,6 +1061,100 @@ describe("nodemode", () => {
     expect(result.stderr).toContain("not found");
   });
 
+  // -- http, net, worker_threads module tests --
+
+  it("http.createServer and listen callback fires", async () => {
+    await writeFile("http-listen.js", `
+      const http = require("http");
+      const server = http.createServer((req, res) => {
+        res.end("ok");
+      });
+      server.listen(3000, () => {
+        console.log("listening");
+        console.log(server.address().port);
+        server.close();
+      });
+    `);
+    const result = await exec("node http-listen.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    const lines = result.stdout.trim().split("\n");
+    expect(lines[0]).toBe("listening");
+    expect(lines[1]).toBe("3000");
+  });
+
+  it("http ServerResponse writeHead and end", async () => {
+    await writeFile("http-res.js", `
+      const http = require("http");
+      const res = new http.ServerResponse();
+      res.writeHead(201, { "X-Custom": "hello" });
+      res.setHeader("content-type", "text/plain");
+      console.log(res.getHeader("x-custom"));
+      console.log(res.statusCode);
+      console.log(res.headersSent);
+      res.end("done");
+      console.log(res.finished);
+    `);
+    const result = await exec("node http-res.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    const lines = result.stdout.trim().split("\n");
+    expect(lines[0]).toBe("hello");
+    expect(lines[1]).toBe("201");
+    expect(lines[2]).toBe("true");
+    expect(lines[3]).toBe("true");
+  });
+
+  it("net.isIP validates addresses", async () => {
+    await writeFile("net-test.js", `
+      const net = require("net");
+      console.log(net.isIP("127.0.0.1"));
+      console.log(net.isIP("::1"));
+      console.log(net.isIP("not-an-ip"));
+      console.log(net.isIPv4("192.168.1.1"));
+      console.log(net.isIPv6("fe80::1"));
+    `);
+    const result = await exec("node net-test.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    const lines = result.stdout.trim().split("\n");
+    expect(lines[0]).toBe("4");
+    expect(lines[1]).toBe("6");
+    expect(lines[2]).toBe("0");
+    expect(lines[3]).toBe("true");
+    expect(lines[4]).toBe("true");
+  });
+
+  it("worker_threads basic postMessage", async () => {
+    await writeFile("wt-test.js", `
+      const { Worker, isMainThread, threadId } = require("worker_threads");
+      console.log("main:" + isMainThread);
+      console.log("tid:" + threadId);
+    `);
+    const result = await exec("node wt-test.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    const lines = result.stdout.trim().split("\n");
+    expect(lines[0]).toBe("main:true");
+    expect(lines[1]).toBe("tid:0");
+  });
+
+  it("require https works as http alias", async () => {
+    await writeFile("https-test.js", `
+      const https = require("https");
+      console.log(typeof https.createServer);
+      console.log(typeof https.request);
+      console.log(Array.isArray(https.METHODS));
+    `);
+    const result = await exec("node https-test.js");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    const lines = result.stdout.trim().split("\n");
+    expect(lines[0]).toBe("function");
+    expect(lines[1]).toBe("function");
+    expect(lines[2]).toBe("true");
+  });
+
   it("invalid JSON returns 400 not 500", async () => {
     const res = await SELF.fetch(
       `http://localhost/workspace/${workspaceId}/exec`,

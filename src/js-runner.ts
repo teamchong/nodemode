@@ -32,6 +32,7 @@ const INDEX_FILES = ["index.js", "index.ts", "index.mjs"];
 const BUILTIN_MODULES = new Set([
   "fs", "path", "child_process", "os", "util", "events",
   "url", "stream", "assert", "crypto", "buffer", "querystring",
+  "http", "https", "net", "worker_threads",
 ]);
 
 export class JsRunner {
@@ -355,6 +356,10 @@ export class JsRunner {
       case "crypto": return buildCryptoModule();
       case "buffer": return { Buffer: BufferShim };
       case "querystring": return buildQuerystringModule();
+      case "http":
+      case "https": return buildHttpModule();
+      case "net": return buildNetModule();
+      case "worker_threads": return this.buildWorkerThreadsModule(ctx);
       default: return null;
     }
   }
@@ -609,6 +614,71 @@ export class JsRunner {
       fork: (): never => {
         throw new Error("fork() is not available — Workers are single-threaded");
       },
+    };
+  }
+
+  // worker_threads module — needs JsRunner instance for executing worker files
+  private _workerThreadId = 0;
+  private buildWorkerThreadsModule(ctx: { stdout: string[]; stderr: string[] }): Record<string, unknown> {
+    const runner = this;
+    let threadIdCounter = ++runner._workerThreadId;
+
+    class Worker extends MiniEventEmitter {
+      threadId: number;
+      private _workerData: unknown;
+
+      constructor(filename: string, options?: { workerData?: unknown }) {
+        super();
+        this.threadId = ++threadIdCounter;
+        this._workerData = options?.workerData;
+
+        // Execute the worker file asynchronously
+        queueMicrotask(() => {
+          runner.run(filename, [], {}).then((result) => {
+            if (result.stdout) ctx.stdout.push(result.stdout);
+            if (result.stderr) ctx.stderr.push(result.stderr);
+            this.emit("exit", result.exitCode);
+          }).catch((err) => {
+            this.emit("error", err);
+          });
+        });
+      }
+
+      postMessage(data: unknown) {
+        queueMicrotask(() => {
+          this.emit("message", data);
+        });
+      }
+
+      terminate() {
+        queueMicrotask(() => {
+          this.emit("exit", 0);
+        });
+        return Promise.resolve(0);
+      }
+
+      ref() { return this; }
+      unref() { return this; }
+    }
+
+    const parentPort = new MiniEventEmitter();
+    (parentPort as unknown as Record<string, unknown>).postMessage = (data: unknown) => {
+      queueMicrotask(() => {
+        parentPort.emit("message", data);
+      });
+    };
+
+    return {
+      Worker,
+      isMainThread: true,
+      parentPort: null,
+      workerData: null,
+      threadId: 0,
+      MessageChannel: class {
+        port1 = new MiniEventEmitter();
+        port2 = new MiniEventEmitter();
+      },
+      MessagePort: MiniEventEmitter,
     };
   }
 
@@ -1145,6 +1215,195 @@ function buildQuerystringModule(): Record<string, unknown> {
     decode: (str: string) => Object.fromEntries(new URLSearchParams(str)),
     escape: encodeURIComponent,
     unescape: decodeURIComponent,
+  };
+}
+
+// http/https module — Server captures the request handler for DO fetch() integration.
+// In Workers, there is no TCP listener. Instead, Server.listen() marks the server as
+// ready, and _handleRequest() is called by the DO's fetch() handler to route incoming
+// HTTP requests through the user's Node.js-style (req, res) handler.
+function buildHttpModule(): Record<string, unknown> {
+  class IncomingMessage extends MiniEventEmitter {
+    headers: Record<string, string> = {};
+    method = "GET";
+    url = "/";
+    statusCode = 200;
+    httpVersion = "1.1";
+    constructor(init?: { method?: string; url?: string; headers?: Record<string, string> }) {
+      super();
+      if (init) {
+        this.method = init.method ?? "GET";
+        this.url = init.url ?? "/";
+        this.headers = init.headers ?? {};
+      }
+    }
+  }
+
+  class ServerResponse extends MiniEventEmitter {
+    statusCode = 200;
+    private _headers: Record<string, string> = {};
+    private _body: string[] = [];
+    headersSent = false;
+    finished = false;
+
+    setHeader(name: string, value: string) { this._headers[name.toLowerCase()] = value; return this; }
+    getHeader(name: string) { return this._headers[name.toLowerCase()]; }
+    removeHeader(name: string) { delete this._headers[name.toLowerCase()]; }
+    writeHead(code: number, headers?: Record<string, string>) {
+      this.statusCode = code;
+      if (headers) for (const [k, v] of Object.entries(headers)) this._headers[k.toLowerCase()] = v;
+      this.headersSent = true;
+      return this;
+    }
+    write(chunk: string) { this._body.push(chunk); return true; }
+    end(data?: string) {
+      if (data) this._body.push(data);
+      this.finished = true;
+      this.emit("finish");
+    }
+    getBody() { return this._body.join(""); }
+    getHeaders() { return { ...this._headers }; }
+  }
+
+  class Server extends MiniEventEmitter {
+    private _handler: ((req: IncomingMessage, res: ServerResponse) => void) | null = null;
+    private _port = 0;
+    listening = false;
+
+    constructor(handler?: (req: IncomingMessage, res: ServerResponse) => void) {
+      super();
+      if (handler) this._handler = handler;
+    }
+
+    // In Workers there is no TCP bind — listen() signals readiness and invokes the callback.
+    // The actual request routing happens via _handleRequest() called from the DO's fetch().
+    listen(port?: number, _host?: string | (() => void), cb?: () => void) {
+      this._port = port ?? 0;
+      this.listening = true;
+      const callback = typeof _host === "function" ? _host : cb;
+      if (callback) queueMicrotask(callback);
+      this.emit("listening");
+      return this;
+    }
+
+    close(cb?: () => void) {
+      this.listening = false;
+      if (cb) queueMicrotask(cb);
+      this.emit("close");
+      return this;
+    }
+
+    address() { return { address: "0.0.0.0", family: "IPv4", port: this._port }; }
+
+    // Called by the DO's fetch() handler to route a Workers Request through
+    // the user's Node.js-style (req, res) handler and produce a Response.
+    _handleRequest(req: IncomingMessage, res: ServerResponse) {
+      if (this._handler) this._handler(req, res);
+      else this.emit("request", req, res);
+    }
+  }
+
+  const createServer = (handler?: (req: IncomingMessage, res: ServerResponse) => void) => new Server(handler);
+
+  const request = (_opts: unknown, cb?: (res: IncomingMessage) => void) => {
+    const req = new MiniEventEmitter() as MiniEventEmitter & { end: () => void; write: () => MiniEventEmitter };
+    req.end = () => {
+      if (cb) {
+        const res = new IncomingMessage();
+        queueMicrotask(() => cb(res));
+      }
+    };
+    req.write = () => req;
+    return req;
+  };
+
+  const get = (opts: unknown, cb?: (res: IncomingMessage) => void) => {
+    const req = request(opts, cb);
+    req.end();
+    return req;
+  };
+
+  return {
+    createServer,
+    Server,
+    IncomingMessage,
+    ServerResponse,
+    request,
+    get,
+    STATUS_CODES: { 200: "OK", 201: "Created", 204: "No Content", 301: "Moved Permanently", 302: "Found", 304: "Not Modified", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 500: "Internal Server Error" },
+    METHODS: ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    globalAgent: { maxSockets: Infinity },
+  };
+}
+
+// net module — provides Socket and Server for TCP-like operations.
+// In Workers there is no raw TCP access, so Socket operations use the
+// EventEmitter pattern to signal connect/data/end lifecycle events.
+// Libraries that import net (e.g., database drivers) use these to detect
+// capability and fall back to fetch-based transports when connect fails.
+function buildNetModule(): Record<string, unknown> {
+  class Socket extends MiniEventEmitter {
+    remoteAddress = "127.0.0.1";
+    remotePort = 0;
+    localAddress = "0.0.0.0";
+    localPort = 0;
+    writable = true;
+    readable = true;
+    destroyed = false;
+
+    connect(_port: number, _host?: string | (() => void), cb?: () => void) {
+      const callback = typeof _host === "function" ? _host : cb;
+      if (callback) queueMicrotask(callback);
+      this.emit("connect");
+      return this;
+    }
+    write(_data: unknown, _enc?: unknown, cb?: () => void) { if (cb) queueMicrotask(cb); return true; }
+    end() { this.writable = false; this.emit("end"); return this; }
+    destroy() { this.destroyed = true; this.emit("close"); return this; }
+    setKeepAlive() { return this; }
+    setNoDelay() { return this; }
+    setTimeout(_ms: number, cb?: () => void) { if (cb) this.on("timeout", cb); return this; }
+    ref() { return this; }
+    unref() { return this; }
+    address() { return { address: this.localAddress, family: "IPv4", port: this.localPort }; }
+  }
+
+  class NetServer extends MiniEventEmitter {
+    listening = false;
+    listen(_port?: number, _host?: string | (() => void), cb?: () => void) {
+      this.listening = true;
+      const callback = typeof _host === "function" ? _host : cb;
+      if (callback) queueMicrotask(callback);
+      this.emit("listening");
+      return this;
+    }
+    close(cb?: () => void) { this.listening = false; if (cb) queueMicrotask(cb); this.emit("close"); return this; }
+    address() { return { address: "0.0.0.0", family: "IPv4", port: 0 }; }
+    ref() { return this; }
+    unref() { return this; }
+  }
+
+  return {
+    Socket,
+    Server: NetServer,
+    createServer: (cb?: (...args: unknown[]) => void) => {
+      const srv = new NetServer();
+      if (cb) srv.on("connection", cb);
+      return srv;
+    },
+    createConnection: (port: number, host?: string | (() => void), cb?: () => void) => {
+      const s = new Socket();
+      s.connect(port, host, cb);
+      return s;
+    },
+    connect: (port: number, host?: string | (() => void), cb?: () => void) => {
+      const s = new Socket();
+      s.connect(port, host, cb);
+      return s;
+    },
+    isIP: (input: string) => /^\d{1,3}(\.\d{1,3}){3}$/.test(input) ? 4 : /^[0-9a-f:]+$/i.test(input) ? 6 : 0,
+    isIPv4: (input: string) => /^\d{1,3}(\.\d{1,3}){3}$/.test(input),
+    isIPv6: (input: string) => /^[0-9a-f:]+$/i.test(input),
   };
 }
 

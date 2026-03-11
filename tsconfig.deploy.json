@@ -4,16 +4,14 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "lib": ["ES2022"],
-    "types": ["@cloudflare/workers-types"],
+    "types": ["node"],
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "allowImportingTsExtensions": true,
-    "outDir": "dist"
+    "allowImportingTsExtensions": true
   },
-  "include": ["src", "worker"],
-  "exclude": ["node_modules", "src/deploy.ts"]
+  "include": ["src/deploy.ts", "test/deploy.test.ts"]
 }
