@@ -40,6 +40,12 @@ const BUILTIN_MODULES = new Set([
 export class JsRunner {
   private moduleCache = new Map<string, Record<string, unknown>>();
   private _activeHttpServer: HttpServer | null = null;
+  private _pendingWorkers: Promise<void>[] = [];
+  private _threadContext: {
+    isMainThread: boolean;
+    parentPort: (MiniEventEmitter & { postMessage: (data: unknown) => void }) | null;
+    workerData: unknown;
+  } = { isMainThread: true, parentPort: null, workerData: null };
 
   constructor(
     private fs: FsEngine,
@@ -47,6 +53,20 @@ export class JsRunner {
     private cwd: string,
     private unsafeEval?: UnsafeEval,
   ) {}
+
+  /** Create a child JsRunner sharing the same fs/pm/cwd but with a fresh module cache. */
+  fork(): JsRunner {
+    return new JsRunner(this.fs, this.pm, this.cwd, this.unsafeEval);
+  }
+
+  /** Configure thread context so worker_threads returns correct isMainThread/parentPort/workerData. */
+  setThreadContext(ctx: {
+    isMainThread: boolean;
+    parentPort: (MiniEventEmitter & { postMessage: (data: unknown) => void }) | null;
+    workerData: unknown;
+  }): void {
+    this._threadContext = ctx;
+  }
 
   // Returns the http.Server that called .listen(), if any.
   // Used by Workspace to route incoming fetch() requests through user code.
@@ -132,6 +152,12 @@ export class JsRunner {
         stderr,
         onExit: (code) => { exitCode = code ?? 0; },
       });
+
+      // Wait for any spawned worker threads to complete
+      if (this._pendingWorkers.length > 0) {
+        await Promise.all(this._pendingWorkers);
+        this._pendingWorkers = [];
+      }
     } catch (err) {
       if (err instanceof ExitSignal) {
         exitCode = err.code;
@@ -185,7 +211,7 @@ export class JsRunner {
     const requireFn = this.buildRequireFn(dirName, ctx);
     const { consoleShim, processShim, globalRef } = this.buildShims(ctx);
 
-    const js = prepareSource(source);
+    const js = prepareSource(source, absPath);
 
     const paramList = "exports, require, module, __filename, __dirname, console, process, setTimeout, clearTimeout, setInterval, clearInterval, Buffer, global, globalThis, queueMicrotask, URL, URLSearchParams, TextEncoder, TextDecoder, atob, btoa";
 
@@ -276,7 +302,7 @@ export class JsRunner {
 
     const { consoleShim, processShim, globalRef } = this.buildShims(ctx);
 
-    const js = prepareSource(source);
+    const js = prepareSource(source, absPath);
     const paramList = "exports, require, module, __filename, __dirname, console, process, setTimeout, clearTimeout, setInterval, clearInterval, Buffer, global, globalThis, queueMicrotask, URL, URLSearchParams, TextEncoder, TextDecoder, atob, btoa";
     const fn = this.compileFunction(paramList, js);
 
@@ -679,37 +705,60 @@ export class JsRunner {
     };
   }
 
-  // worker_threads module — needs JsRunner instance for executing worker files
+  // worker_threads module — uses separate JsRunner instances for true isolation
   private _workerThreadId = 0;
   private buildWorkerThreadsModule(ctx: { stdout: string[]; stderr: string[] }): Record<string, unknown> {
     const runner = this;
-    let threadIdCounter = ++runner._workerThreadId;
+    let threadIdCounter = runner._workerThreadId;
 
     class Worker extends MiniEventEmitter {
       threadId: number;
-      private _workerData: unknown;
+      private _childPort: MiniEventEmitter;
 
       constructor(filename: string, options?: { workerData?: unknown }) {
         super();
         this.threadId = ++threadIdCounter;
-        this._workerData = options?.workerData;
 
-        // Execute the worker file asynchronously
-        queueMicrotask(() => {
-          runner.run(filename, [], {}).then((result) => {
-            if (result.stdout) ctx.stdout.push(result.stdout);
-            if (result.stderr) ctx.stderr.push(result.stderr);
-            this.emit("exit", result.exitCode);
-          }).catch((err) => {
-            this.emit("error", err);
-          });
+        const childRunner = runner.fork();
+
+        // Create parent port for the child — postMessage sends to parent Worker
+        const parentWorker = this;
+        const childParentPort = new MiniEventEmitter();
+        (childParentPort as unknown as Record<string, unknown>).postMessage = (data: unknown) => {
+          const cloned = JSON.parse(JSON.stringify(data));
+          parentWorker.emit("message", cloned);
+        };
+
+        this._childPort = childParentPort;
+
+        // Configure child as a worker thread
+        childRunner.setThreadContext({
+          isMainThread: false,
+          parentPort: childParentPort as MiniEventEmitter & { postMessage: (data: unknown) => void },
+          workerData: options?.workerData !== undefined
+            ? JSON.parse(JSON.stringify(options.workerData))
+            : null,
         });
+
+        // Resolve worker filename relative to cwd (bare names are local files, not packages)
+        const workerPath = filename.startsWith("/") || filename.startsWith("./") || filename.startsWith("../")
+          ? filename
+          : `./${filename}`;
+
+        // Run the worker script in a separate execution context (own module cache)
+        const workerPromise = childRunner.run(workerPath, [], {}).then((result) => {
+          if (result.stdout) ctx.stdout.push(result.stdout);
+          if (result.stderr) ctx.stderr.push(result.stderr);
+          this.emit("exit", result.exitCode);
+        }).catch((err) => {
+          this.emit("error", err);
+        });
+        runner._pendingWorkers.push(workerPromise);
       }
 
       postMessage(data: unknown) {
-        queueMicrotask(() => {
-          this.emit("message", data);
-        });
+        const cloned = JSON.parse(JSON.stringify(data));
+        this._childPort.emit("message", cloned);
       }
 
       terminate() {
@@ -723,19 +772,12 @@ export class JsRunner {
       unref() { return this; }
     }
 
-    const parentPort = new MiniEventEmitter();
-    (parentPort as unknown as Record<string, unknown>).postMessage = (data: unknown) => {
-      queueMicrotask(() => {
-        parentPort.emit("message", data);
-      });
-    };
-
     return {
       Worker,
-      isMainThread: true,
-      parentPort: null,
-      workerData: null,
-      threadId: 0,
+      isMainThread: runner._threadContext.isMainThread,
+      parentPort: runner._threadContext.parentPort,
+      workerData: runner._threadContext.workerData,
+      threadId: runner._threadContext.isMainThread ? 0 : runner._workerThreadId,
       MessageChannel: class {
         port1 = new MiniEventEmitter();
         port2 = new MiniEventEmitter();
@@ -1415,20 +1457,160 @@ function buildHttpModule(onServerListen?: (server: HttpServer) => void): Record<
   const createServer = (handler?: (req: HttpIncomingMessage, res: HttpServerResponse) => void) =>
     new HttpServer(handler, onServerListen);
 
-  const request = (_opts: unknown, cb?: (res: HttpIncomingMessage) => void) => {
-    const req = new MiniEventEmitter() as MiniEventEmitter & { end: () => void; write: () => MiniEventEmitter };
-    req.end = () => {
-      if (cb) {
-        const res = new HttpIncomingMessage();
-        queueMicrotask(() => cb(res));
-      }
-    };
-    req.write = () => req;
-    return req;
+  const STATUS_CODES_MAP: Record<number, string> = {
+    200: "OK", 201: "Created", 204: "No Content",
+    301: "Moved Permanently", 302: "Found", 304: "Not Modified",
+    400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+    404: "Not Found", 500: "Internal Server Error",
   };
 
-  const get = (opts: unknown, cb?: (res: HttpIncomingMessage) => void) => {
-    const req = request(opts, cb);
+  class ClientRequest extends MiniEventEmitter {
+    private _headers: Record<string, string> = {};
+    private _body: string[] = [];
+    private _method: string;
+    private _url: string;
+    private _abortController = new AbortController();
+    private _callback?: (res: HttpIncomingMessage) => void;
+
+    constructor(opts: {
+      protocol?: string;
+      hostname?: string;
+      host?: string;
+      port?: number | string;
+      path?: string;
+      method?: string;
+      headers?: Record<string, string>;
+    }, callback?: (res: HttpIncomingMessage) => void) {
+      super();
+      const protocol = (opts.protocol ?? "http:").replace(/:?$/, ":");
+      const hostname = opts.hostname ?? opts.host ?? "localhost";
+      const port = opts.port ? `:${opts.port}` : "";
+      const path = opts.path ?? "/";
+      this._method = (opts.method ?? "GET").toUpperCase();
+      this._url = `${protocol}//${hostname}${port}${path}`;
+      if (opts.headers) {
+        for (const [k, v] of Object.entries(opts.headers)) {
+          this._headers[k.toLowerCase()] = v;
+        }
+      }
+      this._callback = callback;
+    }
+
+    setHeader(name: string, value: string) { this._headers[name.toLowerCase()] = value; }
+    getHeader(name: string) { return this._headers[name.toLowerCase()]; }
+
+    write(chunk: string | Uint8Array) {
+      this._body.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+      return this;
+    }
+
+    end(chunk?: string | Uint8Array | (() => void), _encoding?: string, _cb?: () => void) {
+      if (typeof chunk === "function") {
+        // end(callback) signature — no body to append
+      } else if (chunk != null) {
+        this.write(chunk);
+      }
+
+      const body = this._body.length > 0 ? this._body.join("") : undefined;
+      const fetchOpts: RequestInit = {
+        method: this._method,
+        headers: this._headers,
+        signal: this._abortController.signal,
+      };
+      if (body && this._method !== "GET" && this._method !== "HEAD") {
+        fetchOpts.body = body;
+      }
+
+      fetch(this._url, fetchOpts)
+        .then(async (fetchRes) => {
+          const incomingHeaders: Record<string, string> = {};
+          fetchRes.headers.forEach((v, k) => { incomingHeaders[k.toLowerCase()] = v; });
+
+          const res = new HttpIncomingMessage({ headers: incomingHeaders });
+          res.statusCode = fetchRes.status;
+          (res as unknown as Record<string, unknown>).statusMessage =
+            fetchRes.statusText || STATUS_CODES_MAP[fetchRes.status] || "";
+
+          if (this._callback) this._callback(res);
+          this.emit("response", res);
+
+          const text = await fetchRes.text();
+          if (text.length > 0) {
+            res.emit("data", text);
+          }
+          res.emit("end");
+        })
+        .catch((err: unknown) => {
+          this.emit("error", err instanceof Error ? err : new Error(String(err)));
+        });
+
+      return this;
+    }
+
+    abort() {
+      this._abortController.abort();
+      this.emit("abort");
+    }
+
+    destroy(err?: Error) {
+      this._abortController.abort();
+      if (err) this.emit("error", err);
+      this.emit("close");
+      return this;
+    }
+  }
+
+  const request = (
+    opts: string | Record<string, unknown>,
+    cb?: ((res: HttpIncomingMessage) => void) | Record<string, unknown>,
+  ) => {
+    let parsedOpts: Record<string, unknown>;
+    let callback: ((res: HttpIncomingMessage) => void) | undefined;
+
+    if (typeof opts === "string") {
+      const url = new URL(opts);
+      parsedOpts = {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port || undefined,
+        path: url.pathname + url.search,
+      };
+    } else {
+      parsedOpts = opts;
+    }
+
+    if (typeof cb === "function") {
+      callback = cb as (res: HttpIncomingMessage) => void;
+    }
+
+    return new ClientRequest(
+      parsedOpts as {
+        protocol?: string; hostname?: string; host?: string;
+        port?: number | string; path?: string; method?: string;
+        headers?: Record<string, string>;
+      },
+      callback,
+    );
+  };
+
+  const get = (
+    opts: string | Record<string, unknown>,
+    cb?: ((res: HttpIncomingMessage) => void) | Record<string, unknown>,
+  ) => {
+    let parsedOpts: Record<string, unknown>;
+    if (typeof opts === "string") {
+      const url = new URL(opts);
+      parsedOpts = {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port || undefined,
+        path: url.pathname + url.search,
+        method: "GET",
+      };
+    } else {
+      parsedOpts = { ...opts, method: "GET" };
+    }
+    const req = request(parsedOpts, cb);
     req.end();
     return req;
   };
@@ -1452,22 +1634,25 @@ function buildHttpModule(onServerListen?: (server: HttpServer) => void): Record<
 // Libraries that import net (e.g., database drivers) use these to detect
 // capability and fall back to fetch-based transports when connect fails.
 function buildNetModule(): Record<string, unknown> {
+  const TCP_ERR = "Raw TCP sockets are not available in Workers. Use fetch() for HTTP or connect() from cloudflare:sockets for TCP.";
+
   class Socket extends MiniEventEmitter {
     remoteAddress = "127.0.0.1";
     remotePort = 0;
     localAddress = "0.0.0.0";
     localPort = 0;
-    writable = true;
-    readable = true;
+    writable = false;
+    readable = false;
     destroyed = false;
 
-    connect(_port: number, _host?: string | (() => void), cb?: () => void) {
-      const callback = typeof _host === "function" ? _host : cb;
-      if (callback) queueMicrotask(callback);
-      this.emit("connect");
+    connect(_port: number, _host?: string | (() => void), _cb?: () => void) {
+      const err = Object.assign(new Error(TCP_ERR), { code: "ERR_SOCKET_NOT_AVAILABLE" });
+      queueMicrotask(() => this.emit("error", err));
       return this;
     }
-    write(_data: unknown, _enc?: unknown, cb?: () => void) { if (cb) queueMicrotask(cb); return true; }
+    write(_data: unknown, _enc?: unknown, _cb?: () => void) {
+      throw Object.assign(new Error(TCP_ERR), { code: "ERR_SOCKET_NOT_AVAILABLE" });
+    }
     end() { this.writable = false; this.emit("end"); return this; }
     destroy() { this.destroyed = true; this.emit("close"); return this; }
     setKeepAlive() { return this; }
@@ -1480,11 +1665,9 @@ function buildNetModule(): Record<string, unknown> {
 
   class NetServer extends MiniEventEmitter {
     listening = false;
-    listen(_port?: number, _host?: string | (() => void), cb?: () => void) {
-      this.listening = true;
-      const callback = typeof _host === "function" ? _host : cb;
-      if (callback) queueMicrotask(callback);
-      this.emit("listening");
+    listen(_port?: number, _host?: string | (() => void), _cb?: () => void) {
+      const err = Object.assign(new Error("TCP server not available in Workers. Use http.createServer() which routes through the DO's fetch handler."), { code: "ERR_SERVER_NOT_AVAILABLE" });
+      queueMicrotask(() => this.emit("error", err));
       return this;
     }
     close(cb?: () => void) { this.listening = false; if (cb) queueMicrotask(cb); this.emit("close"); return this; }
@@ -1532,9 +1715,10 @@ function urlParse(urlStr: string): Record<string, string | null> {
   }
 }
 
-// Pipeline: strip TS types → convert ESM to CJS
-function prepareSource(source: string): string {
-  return esmToCjs(stripTypes(source));
+// Pipeline: strip TS types (for .ts/.mts files only) → convert ESM to CJS
+function prepareSource(source: string, filePath?: string): string {
+  const needsTypeStrip = filePath ? /\.m?ts$/.test(filePath) : true;
+  return esmToCjs(needsTypeStrip ? stripTypes(source) : source);
 }
 
 // Converts ESM import/export syntax to CJS require/module.exports.

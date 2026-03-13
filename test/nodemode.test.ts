@@ -1206,6 +1206,71 @@ describe("nodemode", () => {
     expect(lines[1]).toBe("tid:0");
   });
 
+  it("worker_threads runs in isolated JsRunner with separate module cache", async () => {
+    await writeFile("wt-worker.js", `
+      const { parentPort, workerData, isMainThread } = require("worker_threads");
+      parentPort.postMessage({ fromWorker: true, data: workerData, main: isMainThread });
+    `);
+    await writeFile("wt-parent.js", `
+      const { Worker, isMainThread } = require("worker_threads");
+      const w = new Worker("wt-worker.js", { workerData: { hello: "world" } });
+      w.on("message", (msg) => {
+        console.log("MSG:" + JSON.stringify(msg));
+      });
+      w.on("error", (err) => {
+        console.error("ERR:" + err.message);
+      });
+      w.on("exit", (code) => {
+        console.log("EXIT:" + code);
+      });
+    `);
+    const result = await exec("node wt-parent.js");
+    expect(result.exitCode).toBe(0);
+    const lines = result.stdout.trim().split("\n").filter(Boolean);
+    const msgLine = lines.find(l => l.startsWith("MSG:"));
+    expect(msgLine).toBeDefined();
+    const msg = JSON.parse(msgLine!.slice(4));
+    expect(msg.fromWorker).toBe(true);
+    expect(msg.data).toEqual({ hello: "world" });
+    expect(msg.main).toBe(false);
+  });
+
+  it("worker_threads workerData is cloned (not shared)", async () => {
+    await writeFile("wt-clone-worker.js", `
+      const { parentPort, workerData } = require("worker_threads");
+      workerData.mutated = true;
+      parentPort.postMessage(workerData);
+    `);
+    await writeFile("wt-clone-parent.js", `
+      const { Worker } = require("worker_threads");
+      const data = { original: true };
+      const w = new Worker("wt-clone-worker.js", { workerData: data });
+      w.on("message", (msg) => {
+        console.log("workerGot:" + msg.mutated);
+        console.log("parentStill:" + (data.mutated === undefined));
+      });
+    `);
+    const result = await exec("node wt-clone-parent.js");
+    expect(result.exitCode).toBe(0);
+    const lines = result.stdout.trim().split("\n");
+    expect(lines[0]).toBe("workerGot:true");
+    expect(lines[1]).toBe("parentStill:true");
+  });
+
+  it("net.Socket.connect emits error instead of silently succeeding", async () => {
+    await writeFile("net-connect-test.js", `
+      const net = require("net");
+      const s = new net.Socket();
+      s.on("error", (err) => {
+        console.log("error:" + err.code);
+      });
+      s.connect(3000, "127.0.0.1");
+    `);
+    const result = await exec("node net-connect-test.js");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("error:ERR_SOCKET_NOT_AVAILABLE");
+  });
+
   it("require https works as http alias", async () => {
     await writeFile("https-test.js", `
       const https = require("https");
