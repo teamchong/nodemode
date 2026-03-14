@@ -1,0 +1,3 @@
+[submodule "vendor/gitmode"]
+	path = vendor/gitmode
+	url = git@github.com:teamchong/gitmode.git

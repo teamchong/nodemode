@@ -17,6 +17,46 @@ import { normalizePath } from "./fs-engine";
 import type { UnsafeEval, Env } from "./env";
 import { JsRunner } from "./js-runner";
 import { validateCommand } from "./validate";
+// Types from gitmode submodule — imported directly from porcelain to avoid
+// pulling in gitmode's full dependency tree (node:zlib, Buffer, etc.)
+interface GitCommitInfo {
+  sha: string;
+  tree: string;
+  parents: string[];
+  author: string;
+  authorEmail: string;
+  authorTimestamp: number;
+  committer: string;
+  committerEmail: string;
+  committerTimestamp: number;
+  message: string;
+}
+
+interface GitBranchInfo {
+  name: string;
+  sha: string;
+  isHead: boolean;
+}
+
+interface GitTagInfo {
+  name: string;
+  sha: string;
+  type: "lightweight" | "annotated";
+  target?: string;
+  tagger?: string;
+  message?: string;
+}
+
+interface GitDiffEntry {
+  path: string;
+  status: "added" | "modified" | "deleted" | "renamed";
+  oldSha?: string;
+  newSha?: string;
+  patch?: string;
+  binary?: boolean;
+  oldSize?: number;
+  newSize?: number;
+}
 
 export interface SpawnOptions {
   cwd?: string;
@@ -775,26 +815,246 @@ export class ProcessManager {
       return fail("usage: git <command> [<args>]\n");
     }
 
+    // Derive repo path from cwd (e.g. "/workspace/myrepo" → "workspace/myrepo")
+    const repoPath = cwd === "/" ? "default" : cwd.replace(/^\//, "");
+
     try {
-      const id = this.gitmode.idFromName(cwd === "/" ? "default" : cwd);
+      const id = this.gitmode.idFromName(repoPath);
       const gitDO = this.gitmode.get(id);
-      const response = await gitDO.fetch("http://gitmode/exec", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ args, cwd }),
-      });
 
-      if (!response.ok) {
-        const text = await response.text();
-        return fail(`git: ${text}\n`);
+      switch (subcommand) {
+        case "init": {
+          const branch = args.includes("-b") ? args[args.indexOf("-b") + 1] : undefined;
+          await this.gitApi(gitDO, repoPath, "init", { defaultBranch: branch });
+          return ok(`Initialized empty Git repository in ${cwd}\n`);
+        }
+
+        case "add": {
+          // git add is implicit in gitmode — files are committed directly
+          return ok("");
+        }
+
+        case "commit": {
+          const msgIdx = args.indexOf("-m");
+          const message = msgIdx !== -1 ? args[msgIdx + 1] : "commit";
+          const authorIdx = args.indexOf("--author");
+          let author = "nodemode";
+          let email = "nodemode@workers.dev";
+          if (authorIdx !== -1) {
+            const authorStr = args[authorIdx + 1] || "";
+            const match = authorStr.match(/^(.+?)\s*<(.+?)>$/);
+            if (match) { author = match[1]; email = match[2]; }
+          }
+          const res = await this.gitApi(gitDO, repoPath, "commit", {
+            ref: "HEAD", message, author, email, files: [],
+          }) as { sha: string };
+          return ok(`[HEAD ${res.sha.slice(0, 7)}] ${message}\n`);
+        }
+
+        case "log": {
+          const maxArg = args.find(a => a.startsWith("-n") || a.startsWith("--max-count"));
+          let maxCount = 10;
+          if (maxArg) {
+            const num = maxArg.includes("=") ? maxArg.split("=")[1] : maxArg.replace("-n", "");
+            if (num) maxCount = parseInt(num, 10) || 10;
+            else {
+              const nextIdx = args.indexOf(maxArg) + 1;
+              if (nextIdx < args.length) maxCount = parseInt(args[nextIdx], 10) || 10;
+            }
+          }
+          const oneline = args.includes("--oneline");
+          const ref = args.find(a => !a.startsWith("-")) || "HEAD";
+          const logRef = ref === "log" ? "HEAD" : ref;
+          const logRes = await this.gitApiGet(gitDO, repoPath, "log", { ref: logRef, max: String(maxCount) }) as { commits: GitCommitInfo[] };
+          if (!logRes.commits || logRes.commits.length === 0) return ok("");
+          const lines = logRes.commits.map(c => {
+            if (oneline) return `${c.sha.slice(0, 7)} ${c.message.split("\n")[0]}`;
+            return `commit ${c.sha}\nAuthor: ${c.author} <${c.authorEmail}>\nDate:   ${new Date(c.authorTimestamp * 1000).toUTCString()}\n\n    ${c.message}\n`;
+          });
+          return ok(lines.join("\n") + "\n");
+        }
+
+        case "status": {
+          const branchList = await this.gitApiGet(gitDO, repoPath, "list-branches", {}) as { branches: GitBranchInfo[] };
+          const head = branchList.branches?.find(b => b.isHead);
+          const branchName = head?.name || "main";
+          return ok(`On branch ${branchName}\nnothing to commit, working tree clean\n`);
+        }
+
+        case "branch": {
+          const deleteFlag = args.includes("-d") || args.includes("-D");
+          const renameFlag = args.includes("-m") || args.includes("-M");
+          const branchArgs = args.slice(1).filter(a => !a.startsWith("-"));
+
+          if (deleteFlag && branchArgs[0]) {
+            await this.gitApi(gitDO, repoPath, "delete-branch", { name: branchArgs[0] });
+            return ok(`Deleted branch ${branchArgs[0]}\n`);
+          }
+          if (renameFlag && branchArgs.length >= 2) {
+            await this.gitApi(gitDO, repoPath, "rename-branch", { oldName: branchArgs[0], newName: branchArgs[1] });
+            return ok(`Branch renamed: ${branchArgs[0]} → ${branchArgs[1]}\n`);
+          }
+          if (branchArgs[0]) {
+            const startPoint = branchArgs[1];
+            await this.gitApi(gitDO, repoPath, "create-branch", { name: branchArgs[0], startPoint });
+            return ok(`Created branch ${branchArgs[0]}\n`);
+          }
+
+          const branchRes = await this.gitApiGet(gitDO, repoPath, "list-branches", {}) as { branches: GitBranchInfo[] };
+          const branchLines = (branchRes.branches || []).map(b =>
+            `${b.isHead ? "* " : "  "}${b.name}`
+          );
+          return ok(branchLines.join("\n") + "\n");
+        }
+
+        case "checkout": {
+          const branchName = args.find((a, i) => i > 0 && !a.startsWith("-"));
+          if (!branchName) return fail("git checkout: branch name required\n");
+          await this.gitApi(gitDO, repoPath, "checkout", { branch: branchName });
+          return ok(`Switched to branch '${branchName}'\n`);
+        }
+
+        case "tag": {
+          const tagArgs = args.slice(1).filter(a => !a.startsWith("-"));
+          const deleteTag = args.includes("-d");
+          const annotated = args.includes("-a");
+          const msgIdx = args.indexOf("-m");
+
+          if (deleteTag && tagArgs[0]) {
+            await this.gitApi(gitDO, repoPath, "delete-tag", { name: tagArgs[0] });
+            return ok(`Deleted tag '${tagArgs[0]}'\n`);
+          }
+          if (tagArgs[0]) {
+            if (annotated && msgIdx !== -1) {
+              await this.gitApi(gitDO, repoPath, "create-annotated-tag", {
+                name: tagArgs[0], tagger: "nodemode", email: "nodemode@workers.dev",
+                message: args[msgIdx + 1] || "", target: tagArgs[1],
+              });
+            } else {
+              await this.gitApi(gitDO, repoPath, "create-tag", { name: tagArgs[0], target: tagArgs[1] });
+            }
+            return ok(`Created tag '${tagArgs[0]}'\n`);
+          }
+
+          const tagRes = await this.gitApiGet(gitDO, repoPath, "list-tags", {}) as { tags: GitTagInfo[] };
+          const tagLines = (tagRes.tags || []).map(t => t.name);
+          return ok(tagLines.join("\n") + (tagLines.length ? "\n" : ""));
+        }
+
+        case "diff": {
+          const diffArgs = args.slice(1).filter(a => !a.startsWith("-"));
+          const refA = diffArgs[0] || "HEAD";
+          const refB = diffArgs[1];
+          const params: Record<string, string> = { a: refA, content: "true" };
+          if (refB) params.b = refB;
+          const diffRes = await this.gitApiGet(gitDO, repoPath, "diff", params) as { entries: GitDiffEntry[] };
+          if (!diffRes.entries || diffRes.entries.length === 0) return ok("");
+          const patches = diffRes.entries
+            .filter(e => e.patch)
+            .map(e => `diff --git a/${e.path} b/${e.path}\n${e.patch}`);
+          return ok(patches.join("\n") + "\n");
+        }
+
+        case "show": {
+          const showRef = args[1] || "HEAD";
+          const showRes = await this.gitApiGet(gitDO, repoPath, "show", { ref: showRef }) as {
+            type: string; content: string; size: number;
+          };
+          return ok(showRes.content || "");
+        }
+
+        case "rev-parse": {
+          const revRef = args[1] || "HEAD";
+          const revRes = await this.gitApiGet(gitDO, repoPath, "rev-parse", { ref: revRef }) as { sha: string | null };
+          if (!revRes.sha) return fail(`fatal: ambiguous argument '${revRef}'\n`);
+          return ok(revRes.sha + "\n");
+        }
+
+        case "merge": {
+          const source = args.find((a, i) => i > 0 && !a.startsWith("-"));
+          if (!source) return fail("git merge: branch name required\n");
+          const mergeRes = await this.gitApi(gitDO, repoPath, "merge", {
+            target: "HEAD", source, author: "nodemode", email: "nodemode@workers.dev",
+          }) as { sha?: string; fastForward?: boolean; error?: string };
+          if (mergeRes.error) return fail(`git merge: ${mergeRes.error}\n`);
+          return ok(`Merge made${mergeRes.fastForward ? " (fast-forward)" : ""}.\n`);
+        }
+
+        case "reset": {
+          const targetSha = args.find((a, i) => i > 0 && !a.startsWith("-"));
+          if (!targetSha) return fail("git reset: commit required\n");
+          await this.gitApi(gitDO, repoPath, "reset", { ref: "HEAD", target: targetSha });
+          return ok(`HEAD is now at ${targetSha.slice(0, 7)}\n`);
+        }
+
+        case "grep": {
+          const patternIdx = args.indexOf("-e");
+          const pattern = patternIdx !== -1 ? args[patternIdx + 1] : args.find((a, i) => i > 0 && !a.startsWith("-"));
+          if (!pattern) return fail("git grep: pattern required\n");
+          const grepRef = args.find((a, i) => i > 0 && a !== pattern && !a.startsWith("-")) || "HEAD";
+          const grepRes = await this.gitApiGet(gitDO, repoPath, "grep", {
+            ref: grepRef === pattern ? "HEAD" : grepRef, pattern,
+          }) as { matches: Array<{ path: string; line: number; text: string }> };
+          if (!grepRes.matches || grepRes.matches.length === 0) return { exitCode: 1, stdout: "", stderr: "" };
+          const grepLines = grepRes.matches.map(m => `${m.path}:${m.line}:${m.text}`);
+          return ok(grepLines.join("\n") + "\n");
+        }
+
+        default:
+          return fail(`git: '${subcommand}' is not a git command\n`);
       }
-
-      const result = (await response.json()) as { stdout: string; stderr: string; exitCode: number };
-      return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return fail(`git: ${msg}\n`);
     }
+  }
+
+  /** Send a POST API action to a gitmode RepoStore DO */
+  private async gitApi(
+    gitInstance: { fetch(input: RequestInfo, init?: RequestInit): Promise<Response> },
+    repoPath: string,
+    action: string,
+    body: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const response = await gitInstance.fetch("http://gitmode/api", {
+      method: "POST",
+      headers: {
+        "x-action": "api",
+        "x-repo-path": repoPath,
+        "x-api-action": action,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ error: response.statusText })) as { error?: string };
+      throw new Error(err.error || `HTTP ${response.status}`);
+    }
+    return await response.json() as Record<string, unknown>;
+  }
+
+  /** Send a GET API action to a gitmode RepoStore DO */
+  private async gitApiGet(
+    gitInstance: { fetch(input: RequestInfo, init?: RequestInit): Promise<Response> },
+    repoPath: string,
+    action: string,
+    params: Record<string, string>,
+  ): Promise<Record<string, unknown>> {
+    const url = new URL("http://gitmode/api");
+    for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+    const response = await gitInstance.fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        "x-action": "api",
+        "x-repo-path": repoPath,
+        "x-api-action": action,
+      },
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ error: response.statusText })) as { error?: string };
+      throw new Error(err.error || `HTTP ${response.status}`);
+    }
+    return await response.json() as Record<string, unknown>;
   }
 
   private builtinMkdir(args: string[], cwd: string): SpawnResult {

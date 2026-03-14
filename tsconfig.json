@@ -15,5 +15,5 @@
     "outDir": "dist"
   },
   "include": ["src", "worker"],
-  "exclude": ["node_modules", "src/deploy.ts"]
+  "exclude": ["node_modules", "src/deploy.ts", "vendor"]
 }
