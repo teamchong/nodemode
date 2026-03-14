@@ -155,6 +155,258 @@ export class ProcessManager {
     return this._runner;
   }
 
+  /**
+   * Synchronous execution for execSync/spawnSync — handles builtins that
+   * only touch SQLite (no R2 or DO fetch). Returns null if the command
+   * requires async execution (caller should fall back to exec()).
+   */
+  execSyncBuiltin(command: string, options: SpawnOptions = {}): SpawnResult | null {
+    validateCommand(command);
+    const { cleanCommand, redirects } = extractRedirects(command);
+    const { cmd, args } = parseCommand(cleanCommand);
+    const effectiveCwd = options.cwd || this.cwd;
+
+    if (!BUILTIN_COMMANDS.has(cmd)) return null;
+
+    // Builtins that are purely synchronous (no R2 reads)
+    switch (cmd) {
+      case "echo": {
+        let i = 0;
+        while (args[i] === "-n") i++;
+        return ok(args.slice(i).join(" ") + (i > 0 ? "" : "\n"));
+      }
+      case "true": return ok("");
+      case "false": return fail("");
+      case "pwd": return ok(effectiveCwd + "\n");
+      case "date": return ok(new Date().toISOString() + "\n");
+      case "whoami": return ok((options.env?.["USER"] || "nodemode") + "\n");
+      case "env": return ok(Object.entries(options.env || {}).map(([k, v]) => `${k}=${v}\n`).join(""));
+      case "ls": return this.builtinLs(args, effectiveCwd);
+      case "mkdir": return this.builtinMkdir(args, effectiveCwd);
+      case "touch": {
+        const touchFiles = args.filter((a) => !a.startsWith("-"));
+        for (const file of touchFiles) {
+          const path = resolvePath(effectiveCwd, file);
+          if (this.fs.exists(path)) {
+            this.fs.touch(path);
+          } else {
+            // Create empty file in SQLite (no R2 write needed for sync)
+            this.fs.ensureParentDirs(path);
+            const now = Date.now();
+            this.sql.exec(
+              `INSERT OR REPLACE INTO files (path, r2_key, size, mode, mtime, is_dir) VALUES (?, ?, 0, ?, ?, 0)`,
+              path, `pending/${path}`, 0o644, now,
+            );
+          }
+        }
+        return ok("");
+      }
+      case "basename": {
+        const cleaned = (args[0] || "").replace(/\/+$/, "");
+        return ok((cleaned.split("/").pop() || "/") + "\n");
+      }
+      case "dirname": {
+        const cleaned = (args[0] || "").replace(/\/+$/, "");
+        const parent = cleaned.split("/").slice(0, -1).join("/");
+        return ok((parent || (args[0]?.startsWith("/") ? "/" : ".")) + "\n");
+      }
+      case "which":
+        if (!args[0]) return fail("which: missing argument\n");
+        return BUILTIN_COMMANDS.has(args[0])
+          ? ok(`/usr/bin/${args[0]}\n`)
+          : fail(`which: ${args[0]}: not found\n`);
+      case "printf": return this.builtinPrintf(args);
+      case "test": return this.builtinTest(args, effectiveCwd);
+      case "sleep": return ok("");
+
+      // File-reading builtins: read from SQLite cache synchronously
+      case "cat": return this.builtinCatSync(args, effectiveCwd, options);
+      case "head":
+      case "tail": return this.builtinHeadTailSync(cmd, args, effectiveCwd, options);
+      case "wc": return this.builtinWcSync(args, effectiveCwd, options);
+      case "grep": return this.builtinGrepSync(args, effectiveCwd, options);
+
+      default:
+        // git, rm, cp, mv are async — return null to fall back
+        return null;
+    }
+  }
+
+  /** Read file content from SQLite cache synchronously (for execSync builtins) */
+  private readFileSyncFromCache(path: string): string | null {
+    const rows = this.sql
+      .exec("SELECT data FROM file_cache WHERE path = ?", path)
+      .toArray();
+    if (rows.length > 0) {
+      return new TextDecoder().decode(new Uint8Array(rows[0].data as ArrayBuffer));
+    }
+    // Fall back to checking files table for inline data
+    if (this.fs.exists(path)) {
+      // File exists but not in cache — cannot read synchronously from R2
+      return null;
+    }
+    return null;
+  }
+
+  private builtinCatSync(args: string[], cwd: string, options?: SpawnOptions): SpawnResult {
+    const files = args.filter((a) => a === "-" || !a.startsWith("-"));
+    if (files.length === 0 && options?.stdin) return ok(options.stdin);
+    const outputs: string[] = [];
+    const errors: string[] = [];
+    for (const arg of files) {
+      if (arg === "-" && options?.stdin) { outputs.push(options.stdin); continue; }
+      const path = resolvePath(cwd, arg);
+      const content = this.readFileSyncFromCache(path);
+      if (content === null) {
+        errors.push(`cat: ${arg}: No such file or directory\n`);
+      } else {
+        outputs.push(content);
+      }
+    }
+    return { exitCode: errors.length > 0 ? 1 : 0, stdout: outputs.join(""), stderr: errors.join("") };
+  }
+
+  private builtinHeadTailSync(cmd: "head" | "tail", args: string[], cwd: string, options?: SpawnOptions): SpawnResult {
+    let lines = 10;
+    const files: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === "-n" && args[i + 1]) { lines = parseInt(args[++i], 10); }
+      else if (/^-n\d+$/.test(args[i])) { lines = parseInt(args[i].slice(2), 10); }
+      else if (/^-\d+$/.test(args[i])) { lines = parseInt(args[i].slice(1), 10); }
+      else if (!args[i].startsWith("-")) { files.push(args[i]); }
+    }
+    let content: string;
+    if (files.length > 0) {
+      const path = resolvePath(cwd, files[0]);
+      const fileContent = this.readFileSyncFromCache(path);
+      if (fileContent === null) return fail(`${cmd}: ${files[0]}: No such file or directory\n`);
+      content = fileContent;
+    } else if (options?.stdin) {
+      content = options.stdin;
+    } else {
+      return ok("");
+    }
+    if (!content) return ok("");
+    const allLines = content.endsWith("\n") ? content.slice(0, -1).split("\n") : content.split("\n");
+    const sliced = cmd === "head" ? allLines.slice(0, lines) : allLines.slice(-lines);
+    return ok(sliced.join("\n") + "\n");
+  }
+
+  private builtinWcSync(args: string[], cwd: string, options?: SpawnOptions): SpawnResult {
+    const flags = args.filter((a) => a.startsWith("-")).join("");
+    const files = args.filter((a) => !a.startsWith("-"));
+    let content: string;
+    let label: string;
+    if (files.length > 0) {
+      const path = resolvePath(cwd, files[0]);
+      const fileContent = this.readFileSyncFromCache(path);
+      if (fileContent === null) return fail(`wc: ${files[0]}: No such file or directory\n`);
+      content = fileContent; label = files[0];
+    } else if (options?.stdin != null) {
+      content = options.stdin; label = "";
+    } else {
+      content = ""; label = "";
+    }
+    const lineCount = content.split("\n").length - 1;
+    const wordCount = content.split(/\s+/).filter(Boolean).length;
+    const byteCount = new TextEncoder().encode(content).byteLength;
+    if (flags.includes("l")) return ok(`${lineCount}${label ? " " + label : ""}\n`);
+    if (flags.includes("w")) return ok(`${wordCount}${label ? " " + label : ""}\n`);
+    if (flags.includes("c")) return ok(`${byteCount}${label ? " " + label : ""}\n`);
+    return ok(`${lineCount} ${wordCount} ${byteCount}${label ? " " + label : ""}\n`);
+  }
+
+  private builtinGrepSync(args: string[], cwd: string, options?: SpawnOptions): SpawnResult {
+    // Reuse the async grep logic but with sync file reads
+    let pattern = "";
+    const files: string[] = [];
+    let ignoreCase = false;
+    let lineNumbers = false;
+    let invertMatch = false;
+    let recursive = false;
+    let countOnly = false;
+    let filesOnly = false;
+
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (arg === "-e" && i + 1 < args.length) { pattern = args[++i]; }
+      else if (arg === "-i") { ignoreCase = true; }
+      else if (arg === "-n") { lineNumbers = true; }
+      else if (arg === "-v") { invertMatch = true; }
+      else if (arg === "-r" || arg === "-R") { recursive = true; }
+      else if (arg === "-c") { countOnly = true; }
+      else if (arg === "-l") { filesOnly = true; }
+      else if (arg.startsWith("-") && arg !== "--") {
+        for (const ch of arg.slice(1)) {
+          if (ch === "i") ignoreCase = true;
+          else if (ch === "n") lineNumbers = true;
+          else if (ch === "v") invertMatch = true;
+          else if (ch === "r" || ch === "R") recursive = true;
+          else if (ch === "c") countOnly = true;
+          else if (ch === "l") filesOnly = true;
+        }
+      } else if (!pattern) { pattern = arg; }
+      else { files.push(arg); }
+    }
+
+    if (!pattern) return fail("grep: missing pattern\n");
+
+    let re: RegExp;
+    try { re = new RegExp(pattern, ignoreCase ? "i" : ""); }
+    catch { re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), ignoreCase ? "i" : ""); }
+
+    const grepOneFile = (content: string, label: string): string[] => {
+      const lines = content.split("\n");
+      const matches: string[] = [];
+      for (let i = 0; i < lines.length; i++) {
+        const hit = re.test(lines[i]);
+        if (hit !== invertMatch) {
+          const prefix = files.length > 1 || recursive ? `${label}:` : "";
+          const ln = lineNumbers ? `${i + 1}:` : "";
+          matches.push(`${prefix}${ln}${lines[i]}`);
+        }
+      }
+      return matches;
+    };
+
+    const allMatches: string[] = [];
+
+    if (files.length === 0 && options?.stdin) {
+      allMatches.push(...grepOneFile(options.stdin, "(standard input)"));
+    } else if (recursive) {
+      const dir = files[0] ? resolvePath(cwd, files[0]) : cwd;
+      const entries = this.fs.readdir(dir);
+      const walk = (d: string, es: { name: string; isDirectory: boolean }[]) => {
+        for (const e of es) {
+          const full = d + "/" + e.name;
+          if (e.isDirectory) {
+            walk(full, this.fs.readdir(full));
+          } else {
+            const content = this.readFileSyncFromCache(full);
+            if (content !== null) allMatches.push(...grepOneFile(content, full));
+          }
+        }
+      };
+      walk(dir, entries);
+    } else {
+      for (const f of files) {
+        const path = resolvePath(cwd, f);
+        const content = this.readFileSyncFromCache(path);
+        if (content === null) { allMatches.push(`grep: ${f}: No such file or directory`); continue; }
+        if (filesOnly) { if (re.test(content)) allMatches.push(f); continue; }
+        if (countOnly) { allMatches.push(`${f}:${content.split("\n").filter(l => re.test(l) !== invertMatch).length}`); continue; }
+        allMatches.push(...grepOneFile(content, f));
+      }
+    }
+
+    if (countOnly && files.length <= 1) {
+      const count = allMatches.length;
+      return ok(count + "\n");
+    }
+    if (allMatches.length === 0) return { exitCode: 1, stdout: "", stderr: "" };
+    return ok(allMatches.join("\n") + "\n");
+  }
+
   async exec(command: string, options: SpawnOptions = {}): Promise<SpawnResult> {
     validateCommand(command);
 

@@ -1944,4 +1944,162 @@ describe("nodemode", () => {
     // Should NOT contain SyntaxError details or stack traces
     expect(data.error).not.toContain("SyntaxError");
   });
+
+  // ==========================================================================
+  // Node.js compatibility: execSync, spawnSync, appendFileSync, accessSync
+  // Users expect the SAME code they use in Node.js to work in nodemode
+  // ==========================================================================
+
+  it("execSync returns stdout as Buffer (Uint8Array)", async () => {
+    const result = await exec(`node -e "
+      const { execSync } = require('child_process');
+      const out = execSync('echo hello world');
+      console.log(typeof out);
+      console.log(out instanceof Uint8Array);
+    "`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("object");
+    expect(result.stdout).toContain("true");
+  });
+
+  it("execSync with encoding returns string", async () => {
+    const result = await exec(`node -e "
+      const { execSync } = require('child_process');
+      const out = execSync('echo hi', { encoding: 'utf-8' });
+      console.log(typeof out);
+      console.log(out.trim());
+    "`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("string");
+    expect(result.stdout).toContain("hi");
+  });
+
+  it("execSync runs ls and returns file listing", async () => {
+    await writeFile("sync-test-file.txt", "data");
+    const result = await exec(`node -e "
+      const { execSync } = require('child_process');
+      const out = execSync('ls', { encoding: 'utf-8' });
+      console.log(out.includes('sync-test-file.txt'));
+    "`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("true");
+  });
+
+  it("execSync throws on non-zero exit", async () => {
+    const result = await exec(`node -e "
+      const { execSync } = require('child_process');
+      try { execSync('false'); console.log('no throw'); }
+      catch(e) { console.log('threw'); console.log(e.status); }
+    "`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("threw");
+    expect(result.stdout).toContain("1");
+  });
+
+  it("spawnSync returns status and stdout", async () => {
+    const result = await exec(`node -e "
+      const { spawnSync } = require('child_process');
+      const r = spawnSync('echo', ['sync spawn works']);
+      console.log(r.status);
+      console.log(new TextDecoder().decode(r.stdout).trim());
+    "`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("0");
+    expect(result.stdout).toContain("sync spawn works");
+  });
+
+  it("execFileSync returns output", async () => {
+    const result = await exec(`node -e "
+      const { execFileSync } = require('child_process');
+      const out = execFileSync('echo', ['file sync'], { encoding: 'utf-8' });
+      console.log(out.trim());
+    "`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("file sync");
+  });
+
+  it("fork runs child JS file", async () => {
+    await writeFile("child-fork.js", `console.log('forked child running');`);
+    const result = await exec(`node -e "
+      const { fork } = require('child_process');
+      const cp = fork('./child-fork.js');
+      console.log(typeof cp.on);
+    "`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("function");
+  });
+
+  it("appendFileSync appends to existing file", async () => {
+    const result = await exec(`node -e "
+      const fs = require('fs');
+      fs.writeFileSync('append-test.txt', 'hello');
+      fs.appendFileSync('append-test.txt', ' world');
+      console.log(fs.readFileSync('append-test.txt', 'utf-8'));
+    "`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("hello world");
+  });
+
+  it("accessSync does not throw for existing file", async () => {
+    const result = await exec(`node -e "
+      const fs = require('fs');
+      fs.writeFileSync('access-test.txt', 'exists');
+      try { fs.accessSync('access-test.txt'); console.log('ok'); }
+      catch(e) { console.log('error: ' + e.code); }
+    "`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("ok");
+  });
+
+  it("accessSync throws ENOENT for missing file", async () => {
+    const result = await exec(`node -e "
+      const fs = require('fs');
+      try { fs.accessSync('no-such-file-xyz.txt'); console.log('ok'); }
+      catch(e) { console.log(e.code); }
+    "`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("ENOENT");
+  });
+
+  it("execSync cat reads file written by writeFileSync", async () => {
+    const result = await exec(`node -e "
+      const fs = require('fs');
+      const { execSync } = require('child_process');
+      fs.writeFileSync('cat-sync-test.txt', 'sync cat works');
+      const out = execSync('cat cat-sync-test.txt', { encoding: 'utf-8' });
+      console.log(out.trim());
+    "`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("sync cat works");
+  });
+
+  it("execSync grep filters lines", async () => {
+    const result = await exec(`node -e "
+      const fs = require('fs');
+      const { execSync } = require('child_process');
+      fs.writeFileSync('grep-sync.txt', 'alpha\\nbeta\\ngamma\\n');
+      const out = execSync('grep beta grep-sync.txt', { encoding: 'utf-8' });
+      console.log(out.trim());
+    "`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("beta");
+  });
+
+  it("real Node.js pattern: write file then cat via execSync", async () => {
+    const result = await exec(`node -e "
+      const fs = require('fs');
+      const path = require('path');
+      const { execSync } = require('child_process');
+      const dir = 'sync-project';
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'index.js'), 'module.exports = 42;');
+      const listing = execSync('ls ' + dir, { encoding: 'utf-8' });
+      console.log(listing.trim());
+      const content = execSync('cat ' + dir + '/index.js', { encoding: 'utf-8' });
+      console.log(content.trim());
+    "`);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("index.js");
+    expect(result.stdout).toContain("module.exports = 42;");
+  });
 });

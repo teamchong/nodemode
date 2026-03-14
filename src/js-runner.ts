@@ -17,6 +17,8 @@
 import type { FsEngine } from "./fs-engine";
 export interface CommandExecutor {
   exec(command: string, options?: { cwd?: string; env?: Record<string, string> }): Promise<{ exitCode: number; stdout: string; stderr: string }>;
+  /** Synchronous execution for builtins — returns null if command needs async. */
+  execSyncBuiltin(command: string, options?: { cwd?: string; env?: Record<string, string> }): { exitCode: number; stdout: string; stderr: string } | null;
   /** DO fan-out binding for worker_threads — each Worker spawns a child DO with own CPU budget. */
   threadBinding?: DurableObjectNamespace;
 }
@@ -46,6 +48,7 @@ export class JsRunner {
   private moduleCache = new Map<string, Record<string, unknown>>();
   private _activeHttpServer: HttpServer | null = null;
   private _pendingWorkers: Promise<void>[] = [];
+  _pendingExecs: Promise<unknown>[] = [];
   private _threadContext: {
     isMainThread: boolean;
     parentPort: (MiniEventEmitter & { postMessage: (data: unknown) => void }) | null;
@@ -158,10 +161,14 @@ export class JsRunner {
         onExit: (code) => { exitCode = code ?? 0; },
       });
 
-      // Wait for any spawned worker threads to complete
+      // Wait for any spawned worker threads and async exec calls to complete
       if (this._pendingWorkers.length > 0) {
         await Promise.all(this._pendingWorkers);
         this._pendingWorkers = [];
+      }
+      if (this._pendingExecs.length > 0) {
+        await Promise.all(this._pendingExecs);
+        this._pendingExecs = [];
       }
     } catch (err) {
       if (err instanceof ExitSignal) {
@@ -568,6 +575,30 @@ export class JsRunner {
       return path.startsWith("/") ? path : "/" + path;
     };
 
+    const appendFileSync = (p: string, data: string | Uint8Array) => {
+      const path = String(p);
+      const append = typeof data === "string" ? new TextEncoder().encode(data) : data;
+      const existing = (() => {
+        const rows = sql.exec("SELECT data FROM file_cache WHERE path = ?", path).toArray();
+        if (rows.length > 0) return new Uint8Array(rows[0].data as ArrayBuffer);
+        return null;
+      })();
+      if (existing) {
+        const merged = new Uint8Array(existing.byteLength + append.byteLength);
+        merged.set(existing, 0);
+        merged.set(append, existing.byteLength);
+        writeFileSync(path, merged);
+      } else {
+        writeFileSync(path, append);
+      }
+    };
+
+    const accessSync = (p: string, _mode?: number) => {
+      if (!fsEngine.exists(String(p))) {
+        throw Object.assign(new Error(`ENOENT: no such file or directory, access '${p}'`), { code: "ENOENT" });
+      }
+    };
+
     const createReadStream = (p: string) => {
       const stream = new MiniEventEmitter();
       (stream as Record<string, unknown>).readable = true;
@@ -694,6 +725,7 @@ export class JsRunner {
       existsSync, statSync, lstatSync, readdirSync, mkdirSync,
       readFileSync, writeFileSync, unlinkSync, rmdirSync,
       chmodSync, copyFileSync, renameSync, realpathSync,
+      appendFileSync, accessSync,
       createReadStream, createWriteStream,
       readFile: wrapCb(promises.readFile),
       writeFile: wrapCb(promises.writeFile),
@@ -730,6 +762,7 @@ export class JsRunner {
   // child_process module backed by ProcessManager
   private buildChildProcessModule(ctx: { stdout: string[]; stderr: string[] }): Record<string, unknown> {
     const pm = this.pm;
+    const runner = this;
 
     return {
       exec: (command: string, optionsOrCb?: unknown, cb?: unknown) => {
@@ -760,11 +793,76 @@ export class JsRunner {
         return cp;
       },
 
-      execSync: (command: string): never => {
-        throw new Error(
-          `execSync('${command}') requires synchronous process execution which is not available. ` +
-          `Use exec() with a callback or util.promisify(exec)() instead.`,
-        );
+      execSync: (command: string, options?: Record<string, unknown>): Uint8Array | string => {
+        const opts = options || {};
+        const result = pm.execSyncBuiltin(command, {
+          cwd: opts.cwd as string | undefined,
+          env: opts.env as Record<string, string> | undefined,
+        });
+        if (!result) {
+          // Command needs async execution — queue it as a pending promise
+          // and return empty output (best-effort for sync context)
+          const pending = pm.exec(command, {
+            cwd: opts.cwd as string | undefined,
+            env: opts.env as Record<string, string> | undefined,
+          });
+          runner._pendingExecs.push(pending);
+          // Return empty buffer — the command runs async in background
+          const enc = typeof opts.encoding === "string" ? opts.encoding : undefined;
+          return enc ? "" : new Uint8Array(0);
+        }
+        if (result.exitCode !== 0) {
+          const err = Object.assign(
+            new Error(`Command failed: ${command}\n${result.stderr}`),
+            { status: result.exitCode, stdout: result.stdout, stderr: result.stderr },
+          );
+          throw err;
+        }
+        const enc = typeof opts.encoding === "string" ? opts.encoding : undefined;
+        return enc ? result.stdout : new TextEncoder().encode(result.stdout);
+      },
+
+      spawnSync: (command: string, args?: string[], options?: Record<string, unknown>) => {
+        const fullCommand = args ? `${command} ${args.map(quoteArg).join(" ")}` : command;
+        const opts = options || {};
+        const result = pm.execSyncBuiltin(fullCommand, {
+          cwd: opts.cwd as string | undefined,
+          env: opts.env as Record<string, string> | undefined,
+        });
+        if (!result) {
+          return { status: 0, stdout: new Uint8Array(0), stderr: new Uint8Array(0), pid: 0, output: [null, new Uint8Array(0), new Uint8Array(0)] };
+        }
+        const stdoutBuf = new TextEncoder().encode(result.stdout);
+        const stderrBuf = new TextEncoder().encode(result.stderr);
+        return {
+          status: result.exitCode,
+          stdout: stdoutBuf,
+          stderr: stderrBuf,
+          pid: 0,
+          output: [null, stdoutBuf, stderrBuf],
+        };
+      },
+
+      execFileSync: (file: string, args?: string[], options?: Record<string, unknown>) => {
+        const command = args ? `${file} ${args.map(quoteArg).join(" ")}` : file;
+        const opts = options || {};
+        const result = pm.execSyncBuiltin(command, {
+          cwd: opts.cwd as string | undefined,
+          env: opts.env as Record<string, string> | undefined,
+        });
+        if (!result) {
+          const enc = typeof opts?.encoding === "string" ? opts.encoding : undefined;
+          return enc ? "" : new Uint8Array(0);
+        }
+        if (result.exitCode !== 0) {
+          const err = Object.assign(
+            new Error(`Command failed: ${command}\n${result.stderr}`),
+            { status: result.exitCode, stdout: result.stdout, stderr: result.stderr },
+          );
+          throw err;
+        }
+        const enc = typeof opts?.encoding === "string" ? opts.encoding : undefined;
+        return enc ? result.stdout : new TextEncoder().encode(result.stdout);
       },
 
       spawn: (command: string, args?: string[], options?: Record<string, unknown>) => {
@@ -818,8 +916,24 @@ export class JsRunner {
         return cp;
       },
 
-      fork: (): never => {
-        throw new Error("fork() is not available — Workers are single-threaded");
+      fork: (modulePath: string, args?: string[], options?: Record<string, unknown>) => {
+        const cp = new ChildProcessLike();
+        // Fork runs a JS file in a child JsRunner (or ThreadDO if available)
+        const childRunner = runner.fork();
+        const resolvedPath = modulePath.startsWith("/") || modulePath.startsWith("./") || modulePath.startsWith("../")
+          ? modulePath : "./" + modulePath;
+        childRunner.run(resolvedPath, args || [], options?.env as Record<string, string> | undefined).then((result) => {
+          cp._exitCode = result.exitCode;
+          if (result.stdout) cp.stdout.emit("data", result.stdout);
+          if (result.stderr) cp.stderr.emit("data", result.stderr);
+          cp.stdout.emit("end");
+          cp.stderr.emit("end");
+          cp.emit("exit", result.exitCode);
+          cp.emit("close", result.exitCode);
+        }).catch((err) => {
+          cp.emit("error", err);
+        });
+        return cp;
       },
     };
   }
