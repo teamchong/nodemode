@@ -1,33 +1,52 @@
 ---
 title: nodemode
-description: Experimental Node.js module shims for Cloudflare Workers
+description: Node.js runtime on Cloudflare Workers — for AI coding agents
 ---
 
 > **Experimental** — research prototype, not production-ready.
 
-**nodemode** is an experiment in making `node:fs` and `node:child_process` work on Cloudflare Workers by shimming them with R2 + DO SQLite — the same approach [vinext](https://github.com/cloudflare/vinext) uses to make `next/*` imports work on Workers.
+**nodemode** is a Node.js runtime on Cloudflare Workers, built for AI coding agents (opencode, Codex, Claude Code) that need file I/O, code search, and script execution — all at $0, all on the edge, no containers required.
 
 ## The problem
 
-Cloudflare Workers have no `fs`, no `child_process`, and no shell. Web frameworks work fine (vinext, OpenNext), but tools that need the filesystem and process spawning cannot run at all:
-
+Cloudflare Workers have no `fs`, no `child_process`, and no shell. Web frameworks work fine (vinext, OpenNext), but AI coding agents that need the filesystem, process spawning, and code execution cannot run at all:
 
 | Tool | What it needs | Workers alone | With nodemode |
 |------|--------------|---------------|---------------|
+| **opencode** (AI agent) | fs read/write, grep -r, exec, worker_threads | Impossible | Works |
+| **Claude Code** | file I/O, shell commands, JS execution | Impossible | Works |
 | **zx** (Google) | Shell, pipes, exit codes | Impossible | Works |
 | **simple-git** | .git/ filesystem, refs | Impossible | Works |
-| **create-next-app** | mkdir, templates, npm | Impossible | Works |
-| **lint-staged** | spawn linters, fs.watch | Impossible | Works |
-| **AI coding agents** | fs read/write, exec | Impossible | Works |
+
+## Three-tier execution
+
+```
+Tier 1: Shell builtins     → execute in DO ($0, <1ms)
+Tier 2: JS/TS execution    → JsRunner in DO ($0, ~ms)
+Tier 3: Native binaries    → Container (last resort, ~$0.02/hr)
+```
+
+## Three-tier file cache
+
+```
+Hot:   zerobuf WASM Memory  (sub-μs, zero-copy Uint8Array views)
+Warm:  SQLite file_cache    (sub-ms, persists across DO evictions)
+Cold:  R2                   (~10-50ms, durable)
+```
+
+The hot tier uses [zerobuf](https://www.npmjs.com/package/zerobuf) to store file content in WebAssembly linear memory — reads return `Uint8Array` views directly into WASM memory with no copies.
 
 ## Mapping
 
 | Node.js | Cloudflare Primitive | Status |
 |---------|---------------------|--------|
-| `fs.readFile` / `writeFile` | R2 `get()` / `put()` + SQLite cache | Working |
+| `fs.readFile` / `writeFile` | WASM cache → SQLite cache → R2 | Working |
 | `fs.readdir` / `stat` | DO SQLite directory index | Working |
 | `child_process.exec` (builtins) | 24 in-DO command emulators | Working |
-| `child_process.spawn` (heavy) | Cloudflare Container via `ctx.container` | Working |
+| `child_process.exec` (JS/TS) | JsRunner in DO (V8 isolate) | Working |
+| `child_process.spawn` (native) | Cloudflare Container via `ctx.container` | Working |
+| `node:http` `request()` | `fetch()` wrapper | Working |
+| `node:worker_threads` | Isolated JsRunner instances | Working |
 | Pipes `cmd1 \| cmd2` | Built-in pipe support | Working |
 | Chains `&&` `\|\|` `;` | Built-in chain support | Working |
 | `stdin` / `stdout` / `stderr` | WebSocket + DO SQLite buffer | Working |
@@ -35,16 +54,16 @@ Cloudflare Workers have no `fs`, no `child_process`, and no shell. Web framework
 
 ## Conformance tests
 
-262 tests verify the approach against patterns from popular tools:
+387 tests verify the approach against patterns from popular tools:
 
 | Tool | Tests | Status |
 |------|-------|--------|
-| opencode (AI agent) — fs, exec, refactoring, configs, monorepo | 61 | PASS |
+| opencode (AI agent) — fs, exec, grep -r, worker_threads, http, configs | 113 | PASS |
+| Unit + shim tests — all fs ops, 24 builtins, JsRunner, caches, shell | 140 | PASS |
 | simple-git — .git/ fs, refs, tags, remotes, merge conflicts | 36 | PASS |
 | zx (Google) — pipes, chains, exit codes, conditionals | 35 | PASS |
 | create-next-app / create-vite / degit — mkdir, templates | 19 | PASS |
 | lint-staged / nodemon / esbuild — spawn, watch, bundle | 17 | PASS |
-| Unit + shim tests — all fs ops, 24 builtins, shell, shim API surface | 93 | PASS |
 
 ## Quick Start
 
@@ -87,23 +106,18 @@ Configure wrangler to alias Node.js modules to nodemode's shims:
 }
 ```
 
-Now any library that does `import fs from "node:fs"` or `import { exec } from "node:child_process"` transparently gets nodemode's R2+SQLite implementation — no Container needed, $0 cost, &lt;1ms for cached reads.
-
-```ts
-// This library code works unchanged on Workers:
-import { readFileSync } from "node:fs";    // → nodemode R2+SQLite
-import { exec } from "node:child_process"; // → nodemode ProcessManager
-```
+Now any library that does `import fs from "node:fs"` or `import { exec } from "node:child_process"` transparently gets nodemode's implementation — no Container needed, $0 cost, sub-μs for cached reads.
 
 | Approach | vinext | nodemode |
 |----------|--------|----------|
 | Shims | `next/link`, `next/router`, `next/image` | `node:fs`, `node:child_process` |
-| Enables | Next.js apps on Workers | Node.js tools on Workers |
-| How | Reimplements Next.js API on Vite | Reimplements Node.js API on R2+SQLite+DO |
-| Cost | $0 (Worker) | $0 (built-in commands in DO) |
+| Enables | Next.js apps on Workers | AI coding agents on Workers |
+| How | Reimplements Next.js API on Vite | Reimplements Node.js API on R2+SQLite+DO+WASM |
+| Cost | $0 (Worker) | $0 (built-in commands + JsRunner in DO) |
 
 ## Related Projects
 
+- [zerobuf](https://github.com/teamchong/zerobuf) — Zero-copy JS/WASM data exchange over WebAssembly.Memory
 - [gitmode](https://github.com/teamchong/gitmode) — Git server on Cloudflare Workers
 - [pymode](https://github.com/teamchong/pymode) — Python runtime on Cloudflare Workers
 - [querymode](https://github.com/teamchong/querymode) — Columnar query engine on Cloudflare Workers

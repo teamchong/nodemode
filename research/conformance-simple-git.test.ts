@@ -36,10 +36,11 @@ describe("simple-git conformance", () => {
   // =====================================================================
 
   describe("repo initialization", () => {
-    it("git init requires container (exit 127 in test)", async () => {
+    it("git is a builtin that delegates to GITMODE binding", async () => {
+      // Without GITMODE binding configured, git returns an error
       const result = await exec("git init myrepo");
-      expect(result.exitCode).toBe(127);
-      expect(result.stderr).toContain("command not found");
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("not configured");
     });
 
     it("can simulate repo structure with fs primitives", async () => {

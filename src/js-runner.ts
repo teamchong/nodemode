@@ -17,6 +17,8 @@
 import type { FsEngine } from "./fs-engine";
 export interface CommandExecutor {
   exec(command: string, options?: { cwd?: string; env?: Record<string, string> }): Promise<{ exitCode: number; stdout: string; stderr: string }>;
+  /** DO fan-out binding for worker_threads — each Worker spawns a child DO with own CPU budget. */
+  threadBinding?: DurableObjectNamespace;
 }
 import type { UnsafeEval } from "./env";
 // Workers with nodejs_compat provide node:crypto with synchronous createHash
@@ -35,6 +37,9 @@ const BUILTIN_MODULES = new Set([
   "fs", "path", "child_process", "os", "util", "events",
   "url", "stream", "assert", "crypto", "buffer", "querystring",
   "http", "https", "net", "worker_threads",
+  "dns", "tls", "tty", "string_decoder", "zlib", "readline",
+  "timers", "timers/promises", "perf_hooks", "vm", "constants",
+  "punycode", "dgram",
 ]);
 
 export class JsRunner {
@@ -448,6 +453,19 @@ export class JsRunner {
       case "https": return buildHttpModule((srv) => { this._activeHttpServer = srv; });
       case "net": return buildNetModule();
       case "worker_threads": return this.buildWorkerThreadsModule(ctx);
+      case "dns": return buildDnsModule();
+      case "tls": return buildTlsModule();
+      case "tty": return buildTtyModule();
+      case "string_decoder": return buildStringDecoderModule();
+      case "zlib": return buildZlibModule();
+      case "readline": return buildReadlineModule();
+      case "timers": return buildTimersModule();
+      case "timers/promises": return buildTimersPromisesModule();
+      case "perf_hooks": return buildPerfHooksModule();
+      case "vm": return this.buildVmModule();
+      case "constants": return buildConstantsModule();
+      case "punycode": return buildPunycodeModule();
+      case "dgram": return buildDgramModule();
       default: return null;
     }
   }
@@ -536,6 +554,82 @@ export class JsRunner {
       writeFileSync(String(dest), data as Uint8Array);
     };
 
+    const renameSync = (from: string, to: string) => {
+      const data = readFileSync(String(from));
+      writeFileSync(String(to), data as Uint8Array);
+      unlinkSync(String(from));
+    };
+
+    const realpathSync = (p: string): string => {
+      const path = String(p);
+      if (!fsEngine.exists(path)) {
+        throw Object.assign(new Error(`ENOENT: no such file or directory, realpath '${p}'`), { code: "ENOENT" });
+      }
+      return path.startsWith("/") ? path : "/" + path;
+    };
+
+    const createReadStream = (p: string) => {
+      const stream = new MiniEventEmitter();
+      (stream as Record<string, unknown>).readable = true;
+      (stream as Record<string, unknown>).destroyed = false;
+      (stream as Record<string, unknown>).pipe = (dest: { write: (c: unknown) => void; end: () => void }) => {
+        (stream as MiniEventEmitter).on("data", (chunk: unknown) => dest.write(chunk));
+        (stream as MiniEventEmitter).on("end", () => dest.end());
+        return dest;
+      };
+      (stream as Record<string, unknown>).destroy = () => {
+        (stream as Record<string, unknown>).destroyed = true;
+        stream.emit("close");
+        return stream;
+      };
+      (stream as Record<string, unknown>).setEncoding = () => stream;
+      fsEngine.readFile(String(p)).then((data) => {
+        if (!data) {
+          stream.emit("error", Object.assign(new Error(`ENOENT: '${p}'`), { code: "ENOENT" }));
+          return;
+        }
+        stream.emit("data", data);
+        stream.emit("end");
+        stream.emit("close");
+      }).catch((err) => stream.emit("error", err));
+      return stream;
+    };
+
+    const createWriteStream = (p: string) => {
+      const chunks: Uint8Array[] = [];
+      const stream = new MiniEventEmitter();
+      (stream as Record<string, unknown>).writable = true;
+      (stream as Record<string, unknown>).destroyed = false;
+      (stream as Record<string, unknown>).write = (chunk: string | Uint8Array, _enc?: unknown, cb?: () => void) => {
+        const bytes = typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk;
+        chunks.push(bytes);
+        if (typeof cb === "function") cb();
+        return true;
+      };
+      (stream as Record<string, unknown>).end = (chunk?: string | Uint8Array, _enc?: unknown, cb?: () => void) => {
+        if (chunk != null) {
+          const bytes = typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk;
+          chunks.push(bytes);
+        }
+        const total = chunks.reduce((s, c) => s + c.length, 0);
+        const merged = new Uint8Array(total);
+        let offset = 0;
+        for (const c of chunks) { merged.set(c, offset); offset += c.length; }
+        fsEngine.writeFile(String(p), merged).then(() => {
+          stream.emit("finish");
+          stream.emit("close");
+          if (typeof cb === "function") cb();
+        }).catch((err) => stream.emit("error", err));
+        return stream;
+      };
+      (stream as Record<string, unknown>).destroy = () => {
+        (stream as Record<string, unknown>).destroyed = true;
+        stream.emit("close");
+        return stream;
+      };
+      return stream;
+    };
+
     const promises = {
       readFile: async (p: string, encoding?: string | { encoding?: string }) => {
         const data = await fsEngine.readFile(String(p));
@@ -573,6 +667,19 @@ export class JsRunner {
         if (s.isDirectory) await fsEngine.rmdir(String(p), opts?.recursive ?? false);
         else await fsEngine.unlink(String(p));
       },
+      appendFile: async (p: string, data: string | Uint8Array) => {
+        await fsEngine.appendFile(String(p), data);
+      },
+      realpath: async (p: string) => {
+        const path = String(p);
+        if (!fsEngine.exists(path)) throw Object.assign(new Error(`ENOENT: '${p}'`), { code: "ENOENT" });
+        return path.startsWith("/") ? path : "/" + path;
+      },
+      open: async (p: string, _flags?: string) => {
+        const path = String(p);
+        if (!fsEngine.exists(path)) throw Object.assign(new Error(`ENOENT: '${p}'`), { code: "ENOENT" });
+        return { fd: 3, close: async () => {} };
+      },
     };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -586,7 +693,8 @@ export class JsRunner {
     return {
       existsSync, statSync, lstatSync, readdirSync, mkdirSync,
       readFileSync, writeFileSync, unlinkSync, rmdirSync,
-      chmodSync, copyFileSync,
+      chmodSync, copyFileSync, renameSync, realpathSync,
+      createReadStream, createWriteStream,
       readFile: wrapCb(promises.readFile),
       writeFile: wrapCb(promises.writeFile),
       unlink: wrapCb(promises.unlink),
@@ -600,10 +708,21 @@ export class JsRunner {
       rmdir: wrapCb(promises.rmdir),
       rm: wrapCb(promises.rm),
       chmod: wrapCb(promises.chmod),
+      appendFile: wrapCb(promises.appendFile),
+      realpath: wrapCb(promises.realpath),
+      watch: (_p: string) => {
+        const watcher = new MiniEventEmitter();
+        (watcher as Record<string, unknown>).close = () => {};
+        return watcher;
+      },
       promises,
       constants: {
         F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1,
         COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2,
+        O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2,
+        O_CREAT: 64, O_EXCL: 128, O_TRUNC: 512, O_APPEND: 1024,
+        S_IFMT: 61440, S_IFREG: 32768, S_IFDIR: 16384,
+        S_IRWXU: 448, S_IRUSR: 256, S_IWUSR: 128, S_IXUSR: 64,
       },
     };
   }
@@ -705,11 +824,14 @@ export class JsRunner {
     };
   }
 
-  // worker_threads module — uses separate JsRunner instances for true isolation
+  // worker_threads module
+  // When THREAD_DO binding is available: fan out to child DOs (separate CPU budget + memory).
+  // When not available: fall back to in-process JsRunner instances (shared CPU budget).
   private _workerThreadId = 0;
   private buildWorkerThreadsModule(ctx: { stdout: string[]; stderr: string[] }): Record<string, unknown> {
     const runner = this;
     let threadIdCounter = runner._workerThreadId;
+    const threadBinding = runner.pm.threadBinding;
 
     class Worker extends MiniEventEmitter {
       threadId: number;
@@ -718,7 +840,75 @@ export class JsRunner {
       constructor(filename: string, options?: { workerData?: unknown }) {
         super();
         this.threadId = ++threadIdCounter;
+        this._childPort = new MiniEventEmitter();
 
+        // Resolve worker filename relative to cwd (bare names are local files, not packages)
+        const workerPath = filename.startsWith("/") || filename.startsWith("./") || filename.startsWith("../")
+          ? filename
+          : `./${filename}`;
+
+        const workerData = options?.workerData !== undefined
+          ? JSON.parse(JSON.stringify(options.workerData))
+          : null;
+
+        let workerPromise: Promise<void>;
+
+        if (threadBinding) {
+          // DO fan-out: spawn a child DO with its own 30s CPU budget + 128MB memory
+          workerPromise = this._runOnChildDO(threadBinding, workerPath, workerData, ctx);
+        } else {
+          // In-process fallback: shared CPU budget, separate module cache
+          workerPromise = this._runInProcess(workerPath, workerData, ctx);
+        }
+
+        runner._pendingWorkers.push(workerPromise);
+      }
+
+      private async _runOnChildDO(
+        binding: DurableObjectNamespace,
+        scriptPath: string,
+        workerData: unknown,
+        output: { stdout: string[]; stderr: string[] },
+      ): Promise<void> {
+        try {
+          const id = binding.newUniqueId();
+          const childDO = binding.get(id);
+          const response = await childDO.fetch("http://thread-do/execute", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              scriptPath,
+              workerData,
+              env: {},
+              workspaceId: runner.fs.workspaceId,
+            }),
+          });
+
+          const result = (await response.json()) as {
+            messages: unknown[];
+            stdout: string;
+            stderr: string;
+            exitCode: number;
+          };
+
+          // Deliver messages from child to parent
+          for (const msg of result.messages) {
+            this.emit("message", msg);
+          }
+
+          if (result.stdout) output.stdout.push(result.stdout);
+          if (result.stderr) output.stderr.push(result.stderr);
+          this.emit("exit", result.exitCode);
+        } catch (err) {
+          this.emit("error", err);
+        }
+      }
+
+      private async _runInProcess(
+        workerPath: string,
+        workerData: unknown,
+        output: { stdout: string[]; stderr: string[] },
+      ): Promise<void> {
         const childRunner = runner.fork();
 
         // Create parent port for the child — postMessage sends to parent Worker
@@ -731,29 +921,20 @@ export class JsRunner {
 
         this._childPort = childParentPort;
 
-        // Configure child as a worker thread
         childRunner.setThreadContext({
           isMainThread: false,
           parentPort: childParentPort as MiniEventEmitter & { postMessage: (data: unknown) => void },
-          workerData: options?.workerData !== undefined
-            ? JSON.parse(JSON.stringify(options.workerData))
-            : null,
+          workerData,
         });
 
-        // Resolve worker filename relative to cwd (bare names are local files, not packages)
-        const workerPath = filename.startsWith("/") || filename.startsWith("./") || filename.startsWith("../")
-          ? filename
-          : `./${filename}`;
-
-        // Run the worker script in a separate execution context (own module cache)
-        const workerPromise = childRunner.run(workerPath, [], {}).then((result) => {
-          if (result.stdout) ctx.stdout.push(result.stdout);
-          if (result.stderr) ctx.stderr.push(result.stderr);
+        try {
+          const result = await childRunner.run(workerPath, [], {});
+          if (result.stdout) output.stdout.push(result.stdout);
+          if (result.stderr) output.stderr.push(result.stderr);
           this.emit("exit", result.exitCode);
-        }).catch((err) => {
+        } catch (err) {
           this.emit("error", err);
-        });
-        runner._pendingWorkers.push(workerPromise);
+        }
       }
 
       postMessage(data: unknown) {
@@ -783,6 +964,46 @@ export class JsRunner {
         port2 = new MiniEventEmitter();
       },
       MessagePort: MiniEventEmitter,
+    };
+  }
+
+  // vm module — uses UnsafeEval to execute code in isolated contexts
+  private buildVmModule(): Record<string, unknown> {
+    const runner = this;
+
+    class Script {
+      private _code: string;
+      constructor(code: string) { this._code = code; }
+      runInThisContext() {
+        const fn = runner.compileFunction("", `return (${this._code});`);
+        return fn();
+      }
+      runInNewContext(sandbox?: Record<string, unknown>) {
+        const keys = sandbox ? Object.keys(sandbox) : [];
+        const values = sandbox ? Object.values(sandbox) : [];
+        const fn = runner.compileFunction(keys.join(", "), `return (${this._code});`);
+        return fn(...values);
+      }
+    }
+
+    return {
+      Script,
+      createScript: (code: string) => new Script(code),
+      runInThisContext: (code: string) => {
+        try { return new Script(code).runInThisContext(); }
+        catch { const fn = runner.compileFunction("", code); return fn(); }
+      },
+      runInNewContext: (code: string, sandbox?: Record<string, unknown>) => {
+        try { return new Script(code).runInNewContext(sandbox); }
+        catch {
+          const keys = sandbox ? Object.keys(sandbox) : [];
+          const values = sandbox ? Object.values(sandbox) : [];
+          const fn = runner.compileFunction(keys.join(", "), code);
+          return fn(...values);
+        }
+      },
+      createContext: (sandbox?: Record<string, unknown>) => ({ ...sandbox }),
+      isContext: () => true,
     };
   }
 
@@ -945,6 +1166,7 @@ const BufferShim = {
 // -- MiniEventEmitter --
 
 class MiniEventEmitter {
+  [key: string]: unknown; // Allow dynamic property assignment for stream/socket shims
   private _h: Record<string, Array<(...args: unknown[]) => void>> = {};
   on(e: string, fn: (...args: unknown[]) => void) { (this._h[e] ??= []).push(fn); return this; }
   once(e: string, fn: (...args: unknown[]) => void) {
@@ -1697,6 +1919,445 @@ function buildNetModule(): Record<string, unknown> {
     isIP: (input: string) => /^\d{1,3}(\.\d{1,3}){3}$/.test(input) ? 4 : /^[0-9a-f:]+$/i.test(input) ? 6 : 0,
     isIPv4: (input: string) => /^\d{1,3}(\.\d{1,3}){3}$/.test(input),
     isIPv6: (input: string) => /^[0-9a-f:]+$/i.test(input),
+  };
+}
+
+// -- DNS module --
+// Uses DNS-over-HTTPS via Cloudflare's 1.1.1.1 for actual resolution
+function buildDnsModule(): Record<string, unknown> {
+  const lookup = (hostname: string, optionsOrCb?: unknown, cb?: unknown) => {
+    const callback = typeof optionsOrCb === "function" ? optionsOrCb as (err: Error | null, address: string, family: number) => void : cb as (err: Error | null, address: string, family: number) => void;
+    fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=A`, {
+      headers: { Accept: "application/dns-json" },
+    })
+      .then(async (res) => {
+        const data = await res.json() as { Answer?: Array<{ data: string }> };
+        const answer = data.Answer?.[0]?.data ?? "127.0.0.1";
+        if (callback) callback(null, answer, 4);
+      })
+      .catch((err) => {
+        if (callback) callback(err as Error, "", 0);
+      });
+  };
+
+  const resolve = (hostname: string, rrtype: string | ((err: Error | null, records: string[]) => void), cb?: (err: Error | null, records: string[]) => void) => {
+    const type = typeof rrtype === "string" ? rrtype : "A";
+    const callback = typeof rrtype === "function" ? rrtype : cb;
+    fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${type}`, {
+      headers: { Accept: "application/dns-json" },
+    })
+      .then(async (res) => {
+        const data = await res.json() as { Answer?: Array<{ data: string }> };
+        const records = (data.Answer ?? []).map((a) => a.data);
+        if (callback) callback(null, records);
+      })
+      .catch((err) => {
+        if (callback) callback(err as Error, []);
+      });
+  };
+
+  const promises = {
+    lookup: async (hostname: string) => {
+      const res = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=A`, {
+        headers: { Accept: "application/dns-json" },
+      });
+      const data = await res.json() as { Answer?: Array<{ data: string }> };
+      return { address: data.Answer?.[0]?.data ?? "127.0.0.1", family: 4 };
+    },
+    resolve: async (hostname: string, rrtype = "A") => {
+      const res = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${rrtype}`, {
+        headers: { Accept: "application/dns-json" },
+      });
+      const data = await res.json() as { Answer?: Array<{ data: string }> };
+      return (data.Answer ?? []).map((a) => a.data);
+    },
+  };
+
+  return {
+    lookup,
+    resolve,
+    resolve4: (hostname: string, cb: (err: Error | null, addresses: string[]) => void) => resolve(hostname, "A", cb),
+    resolve6: (hostname: string, cb: (err: Error | null, addresses: string[]) => void) => resolve(hostname, "AAAA", cb),
+    resolveMx: (hostname: string, cb: (err: Error | null, addresses: string[]) => void) => resolve(hostname, "MX", cb),
+    resolveTxt: (hostname: string, cb: (err: Error | null, addresses: string[]) => void) => resolve(hostname, "TXT", cb),
+    resolveCname: (hostname: string, cb: (err: Error | null, addresses: string[]) => void) => resolve(hostname, "CNAME", cb),
+    resolveNs: (hostname: string, cb: (err: Error | null, addresses: string[]) => void) => resolve(hostname, "NS", cb),
+    reverse: (_ip: string, cb: (err: Error | null, hostnames: string[]) => void) => {
+      cb(Object.assign(new Error("reverse DNS not available"), { code: "ENOENT" }) as Error, []);
+    },
+    getServers: () => ["1.1.1.1", "1.0.0.1"],
+    setServers: () => {},
+    promises,
+    NODATA: "ENODATA", FORMERR: "EFORMERR", SERVFAIL: "ESERVFAIL",
+    NOTFOUND: "ENOTFOUND", NOTIMP: "ENOTIMP", REFUSED: "EREFUSED",
+    BADQUERY: "EBADQUERY", BADNAME: "EBADNAME", BADFAMILY: "EBADFAMILY",
+    BADRESP: "EBADRESP", CONNREFUSED: "ECONNREFUSED", TIMEOUT: "ETIMEOUT",
+    EOF: "EOF", FILE: "EFILE", NOMEM: "ENOMEM", DESTRUCTION: "EDESTRUCTION",
+    CANCELLED: "ECANCELLED",
+  };
+}
+
+// -- TLS module --
+// Workers handle TLS at the edge. This provides the API surface so libraries
+// that import tls for capability detection work correctly.
+function buildTlsModule(): Record<string, unknown> {
+  class TLSSocket extends MiniEventEmitter {
+    encrypted = true;
+    authorized = true;
+    remoteAddress = "127.0.0.1";
+    remotePort = 443;
+    destroyed = false;
+
+    connect() {
+      const err = Object.assign(new Error("Raw TLS sockets are not available in Workers. Use fetch() for HTTPS."), { code: "ERR_TLS_NOT_AVAILABLE" });
+      queueMicrotask(() => this.emit("error", err));
+      return this;
+    }
+    write() { return false; }
+    end() { this.emit("end"); return this; }
+    destroy() { this.destroyed = true; this.emit("close"); return this; }
+    getPeerCertificate() { return {}; }
+    getProtocol() { return "TLSv1.3"; }
+    getCipher() { return { name: "TLS_AES_256_GCM_SHA384", version: "TLSv1.3" }; }
+    setEncoding() { return this; }
+    ref() { return this; }
+    unref() { return this; }
+  }
+
+  return {
+    TLSSocket,
+    connect: (options: Record<string, unknown>, cb?: () => void) => {
+      const socket = new TLSSocket();
+      socket.connect();
+      if (cb) socket.once("secureConnect", cb);
+      return socket;
+    },
+    createServer: () => {
+      throw new Error("TLS server not available in Workers. Use http.createServer() which handles TLS at the edge.");
+    },
+    createSecureContext: () => ({}),
+    DEFAULT_MIN_VERSION: "TLSv1.2",
+    DEFAULT_MAX_VERSION: "TLSv1.3",
+    rootCertificates: [],
+  };
+}
+
+// -- TTY module --
+// Workers are headless — no terminal attached. isatty() returns false,
+// WriteStream reports 80x24 for libraries that check dimensions.
+function buildTtyModule(): Record<string, unknown> {
+  class ReadStream extends MiniEventEmitter {
+    isTTY = false;
+    isRaw = false;
+    setRawMode() { return this; }
+  }
+  class WriteStream extends MiniEventEmitter {
+    isTTY = false;
+    columns = 80;
+    rows = 24;
+    getColorDepth() { return 1; }
+    hasColors() { return false; }
+    getWindowSize() { return [this.columns, this.rows]; }
+    cursorTo() { return true; }
+    clearLine() { return true; }
+    clearScreenDown() { return true; }
+    moveCursor() { return true; }
+  }
+  return {
+    ReadStream,
+    WriteStream,
+    isatty: () => false,
+  };
+}
+
+// -- StringDecoder module --
+// Wraps TextDecoder for incremental multi-byte decoding
+function buildStringDecoderModule(): Record<string, unknown> {
+  class StringDecoder {
+    private decoder: TextDecoder;
+    constructor(encoding?: string) {
+      const enc = (encoding ?? "utf-8").toLowerCase().replace(/[-_]/g, "");
+      const label = enc === "utf8" ? "utf-8" : enc === "ascii" ? "utf-8" : enc === "latin1" ? "latin1" : enc === "ucs2" || enc === "utf16le" ? "utf-16le" : "utf-8";
+      this.decoder = new TextDecoder(label, { fatal: false, ignoreBOM: false });
+    }
+    write(buf: Uint8Array | ArrayBuffer): string {
+      const data = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+      return this.decoder.decode(data, { stream: true });
+    }
+    end(buf?: Uint8Array | ArrayBuffer): string {
+      if (buf) {
+        const data = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+        return this.decoder.decode(data, { stream: false });
+      }
+      return this.decoder.decode(new Uint8Array(0), { stream: false });
+    }
+  }
+  return { StringDecoder };
+}
+
+// -- Zlib module --
+// Uses Workers' built-in CompressionStream/DecompressionStream APIs
+function buildZlibModule(): Record<string, unknown> {
+  const compress = async (data: Uint8Array, format: string): Promise<Uint8Array> => {
+    const cs = new CompressionStream(format as "gzip" | "deflate" | "deflate-raw");
+    const writer = cs.writable.getWriter();
+    writer.write(data);
+    writer.close();
+    const reader = cs.readable.getReader();
+    const chunks: Uint8Array[] = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+    }
+    const total = chunks.reduce((s, c) => s + c.length, 0);
+    const result = new Uint8Array(total);
+    let offset = 0;
+    for (const c of chunks) { result.set(c, offset); offset += c.length; }
+    return result;
+  };
+
+  const decompress = async (data: Uint8Array, format: string): Promise<Uint8Array> => {
+    const ds = new DecompressionStream(format as "gzip" | "deflate" | "deflate-raw");
+    const writer = ds.writable.getWriter();
+    writer.write(data);
+    writer.close();
+    const reader = ds.readable.getReader();
+    const chunks: Uint8Array[] = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+    }
+    const total = chunks.reduce((s, c) => s + c.length, 0);
+    const result = new Uint8Array(total);
+    let offset = 0;
+    for (const c of chunks) { result.set(c, offset); offset += c.length; }
+    return result;
+  };
+
+  const wrapCallback = (fn: (data: Uint8Array) => Promise<Uint8Array>) =>
+    (buf: Uint8Array | string, cb: (err: Error | null, result?: Uint8Array) => void) => {
+      const data = typeof buf === "string" ? new TextEncoder().encode(buf) : buf;
+      fn(data).then((r) => cb(null, r)).catch((e) => cb(e as Error));
+    };
+
+  const gzip = (data: Uint8Array) => compress(data, "gzip");
+  const gunzip = (data: Uint8Array) => decompress(data, "gzip");
+  const deflate = (data: Uint8Array) => compress(data, "deflate");
+  const inflate = (data: Uint8Array) => decompress(data, "deflate");
+  const deflateRaw = (data: Uint8Array) => compress(data, "deflate-raw");
+  const inflateRaw = (data: Uint8Array) => decompress(data, "deflate-raw");
+
+  // Transform streams for piping
+  const createGzip = () => new CompressionStream("gzip");
+  const createGunzip = () => new DecompressionStream("gzip");
+  const createDeflate = () => new CompressionStream("deflate");
+  const createInflate = () => new DecompressionStream("deflate");
+  const createDeflateRaw = () => new CompressionStream("deflate-raw");
+  const createInflateRaw = () => new DecompressionStream("deflate-raw");
+
+  return {
+    gzip: wrapCallback(gzip), gunzip: wrapCallback(gunzip),
+    deflate: wrapCallback(deflate), inflate: wrapCallback(inflate),
+    deflateRaw: wrapCallback(deflateRaw), inflateRaw: wrapCallback(inflateRaw),
+    gzipSync: () => { throw new Error("zlib sync methods are not available in Workers. Use the async version with util.promisify()."); },
+    gunzipSync: () => { throw new Error("zlib sync methods are not available in Workers. Use the async version with util.promisify()."); },
+    deflateSync: () => { throw new Error("zlib sync methods are not available in Workers. Use the async version with util.promisify()."); },
+    inflateSync: () => { throw new Error("zlib sync methods are not available in Workers. Use the async version with util.promisify()."); },
+    createGzip, createGunzip, createDeflate, createInflate,
+    createDeflateRaw, createInflateRaw,
+    constants: {
+      Z_NO_FLUSH: 0, Z_PARTIAL_FLUSH: 1, Z_SYNC_FLUSH: 2, Z_FULL_FLUSH: 3, Z_FINISH: 4,
+      Z_OK: 0, Z_STREAM_END: 1, Z_NEED_DICT: 2, Z_STREAM_ERROR: -2, Z_DATA_ERROR: -3,
+      Z_NO_COMPRESSION: 0, Z_BEST_SPEED: 1, Z_BEST_COMPRESSION: 9, Z_DEFAULT_COMPRESSION: -1,
+      DEFLATE: 1, INFLATE: 2, GZIP: 3, GUNZIP: 4, DEFLATERAW: 5, INFLATERAW: 6, UNZIP: 7,
+    },
+  };
+}
+
+// -- Readline module --
+// Line-by-line interface for interactive input processing
+function buildReadlineModule(): Record<string, unknown> {
+  class Interface extends MiniEventEmitter {
+    private _input: MiniEventEmitter;
+    private _output: { write: (s: string) => void } | null;
+    private _prompt = "> ";
+    private _closed = false;
+
+    constructor(options: { input: MiniEventEmitter; output?: { write: (s: string) => void }; prompt?: string; terminal?: boolean }) {
+      super();
+      this._input = options.input;
+      this._output = options.output ?? null;
+      if (options.prompt !== undefined) this._prompt = options.prompt;
+      this._input.on("data", (data: unknown) => {
+        const text = String(data);
+        const lines = text.split("\n");
+        for (const line of lines) {
+          if (line) this.emit("line", line);
+        }
+      });
+      this._input.on("end", () => this.close());
+    }
+
+    question(query: string, cb: (answer: string) => void) {
+      if (this._output) this._output.write(query);
+      this.once("line", (line: unknown) => cb(String(line)));
+    }
+
+    prompt() {
+      if (this._output) this._output.write(this._prompt);
+    }
+
+    setPrompt(prompt: string) { this._prompt = prompt; }
+
+    close() {
+      if (this._closed) return;
+      this._closed = true;
+      this.emit("close");
+    }
+
+    write(_data: string) {}
+    pause() { return this; }
+    resume() { return this; }
+  }
+
+  return {
+    createInterface: (options: Record<string, unknown> | MiniEventEmitter) => {
+      if (options instanceof MiniEventEmitter || (options && typeof (options as Record<string, unknown>).on === "function")) {
+        return new Interface({ input: options as MiniEventEmitter });
+      }
+      return new Interface(options as { input: MiniEventEmitter; output?: { write: (s: string) => void }; prompt?: string; terminal?: boolean });
+    },
+    Interface,
+    clearLine: (_stream: unknown, _dir: number, cb?: () => void) => { if (cb) cb(); },
+    clearScreenDown: (_stream: unknown, cb?: () => void) => { if (cb) cb(); },
+    cursorTo: (_stream: unknown, _x: number, _y?: number | (() => void), cb?: () => void) => {
+      const callback = typeof _y === "function" ? _y : cb;
+      if (callback) callback();
+    },
+    moveCursor: (_stream: unknown, _dx: number, _dy: number, cb?: () => void) => { if (cb) cb(); },
+    emitKeypressEvents: () => {},
+  };
+}
+
+// -- Timers module --
+function buildTimersModule(): Record<string, unknown> {
+  return {
+    setTimeout: globalThis.setTimeout.bind(globalThis),
+    clearTimeout: globalThis.clearTimeout.bind(globalThis),
+    setInterval: globalThis.setInterval.bind(globalThis),
+    clearInterval: globalThis.clearInterval.bind(globalThis),
+    setImmediate: (fn: (...args: unknown[]) => void, ...args: unknown[]) => globalThis.setTimeout(() => fn(...args), 0),
+    clearImmediate: (id: unknown) => globalThis.clearTimeout(id as number),
+  };
+}
+
+// -- Timers/promises module --
+function buildTimersPromisesModule(): Record<string, unknown> {
+  return {
+    setTimeout: (delay: number, value?: unknown) =>
+      new Promise((resolve) => globalThis.setTimeout(() => resolve(value), delay)),
+    setImmediate: (value?: unknown) =>
+      new Promise((resolve) => globalThis.setTimeout(() => resolve(value), 0)),
+    scheduler: {
+      wait: (delay: number) => new Promise((resolve) => globalThis.setTimeout(resolve, delay)),
+      yield: () => new Promise((resolve) => queueMicrotask(() => resolve(undefined))),
+    },
+  };
+}
+
+// -- PerfHooks module --
+// Uses Date.now() since performance.now() resolution in Workers is limited
+function buildPerfHooksModule(): Record<string, unknown> {
+  const performanceObj = {
+    now: () => Date.now(),
+    timeOrigin: Date.now(),
+    mark: (name: string) => ({ name, startTime: Date.now(), duration: 0, entryType: "mark" }),
+    measure: (name: string, _start?: string, _end?: string) => ({ name, startTime: Date.now(), duration: 0, entryType: "measure" }),
+    getEntries: () => [] as unknown[],
+    getEntriesByName: () => [] as unknown[],
+    getEntriesByType: () => [] as unknown[],
+    clearMarks: () => {},
+    clearMeasures: () => {},
+    toJSON: () => ({ timeOrigin: Date.now() }),
+  };
+
+  class PerformanceObserver {
+    private _callback: (list: { getEntries: () => unknown[] }) => void;
+    constructor(callback: (list: { getEntries: () => unknown[] }) => void) {
+      this._callback = callback;
+    }
+    observe() {}
+    disconnect() {}
+  }
+
+  return {
+    performance: performanceObj,
+    PerformanceObserver,
+    monitorEventLoopDelay: () => ({
+      enable: () => {},
+      disable: () => {},
+      percentile: () => 0,
+      min: 0, max: 0, mean: 0, stddev: 0,
+    }),
+  };
+}
+
+// -- Constants module --
+function buildConstantsModule(): Record<string, unknown> {
+  return {
+    F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1,
+    O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2,
+    O_CREAT: 64, O_EXCL: 128, O_TRUNC: 512, O_APPEND: 1024,
+    S_IFMT: 61440, S_IFREG: 32768, S_IFDIR: 16384,
+    S_IRWXU: 448, S_IRUSR: 256, S_IWUSR: 128, S_IXUSR: 64,
+    SIGTERM: 15, SIGKILL: 9, SIGINT: 2, SIGHUP: 1,
+    E2BIG: 7, EACCES: 13, EADDRINUSE: 98, EADDRNOTAVAIL: 99,
+    EEXIST: 17, ENOENT: 2, ENOTDIR: 20, ENOTEMPTY: 39,
+    EPERM: 1, EISDIR: 21,
+  };
+}
+
+// -- Punycode module --
+function buildPunycodeModule(): Record<string, unknown> {
+  return {
+    encode: (input: string) => {
+      try { return new URL(`http://${input}`).hostname; } catch { return input; }
+    },
+    decode: (input: string) => input,
+    toASCII: (domain: string) => {
+      try { return new URL(`http://${domain}`).hostname; } catch { return domain; }
+    },
+    toUnicode: (domain: string) => domain,
+    ucs2: {
+      encode: (codePoints: number[]) => String.fromCodePoint(...codePoints),
+      decode: (str: string) => [...str].map((c) => c.codePointAt(0)!),
+    },
+    version: "2.3.1",
+  };
+}
+
+// -- Dgram (UDP) module --
+// Workers do not support raw UDP sockets
+function buildDgramModule(): Record<string, unknown> {
+  return {
+    createSocket: () => {
+      const socket = new MiniEventEmitter();
+      (socket as Record<string, unknown>).bind = () => {
+        const err = Object.assign(new Error("UDP sockets are not available in Workers"), { code: "ERR_SOCKET_NOT_AVAILABLE" });
+        queueMicrotask(() => socket.emit("error", err));
+        return socket;
+      };
+      (socket as Record<string, unknown>).send = () => {
+        throw Object.assign(new Error("UDP sockets are not available in Workers"), { code: "ERR_SOCKET_NOT_AVAILABLE" });
+      };
+      (socket as Record<string, unknown>).close = (cb?: () => void) => { if (cb) queueMicrotask(cb); socket.emit("close"); };
+      (socket as Record<string, unknown>).address = () => ({ address: "0.0.0.0", family: "IPv4", port: 0 });
+      (socket as Record<string, unknown>).ref = () => socket;
+      (socket as Record<string, unknown>).unref = () => socket;
+      return socket;
+    },
   };
 }
 

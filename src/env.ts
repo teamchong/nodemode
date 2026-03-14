@@ -14,6 +14,12 @@ export interface Env {
   WORKSPACE: DurableObjectNamespace;
   UNSAFE_EVAL?: UnsafeEval;
 
+  // Git operations — delegates to gitmode's GitEngine + porcelain
+  GITMODE?: DurableObjectNamespace;
+
+  // DO fan-out for worker_threads — each child gets own CPU budget + memory
+  THREAD_DO?: DurableObjectNamespace;
+
   // Optional: R2 S3-compatible credentials for container snapshot upload/restore
   R2_ENDPOINT?: string;
   R2_ACCESS_KEY?: string;

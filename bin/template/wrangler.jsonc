@@ -14,11 +14,20 @@
 
   "durable_objects": {
     "bindings": [
-      { "name": "WORKSPACE", "class_name": "Workspace" }
+      { "name": "WORKSPACE", "class_name": "Workspace" },
+      { "name": "THREAD_DO", "class_name": "ThreadDO" }
     ]
   },
 
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["Workspace"] }
-  ]
+    { "tag": "v1", "new_sqlite_classes": ["Workspace"] },
+    { "tag": "v2", "new_sqlite_classes": ["ThreadDO"] }
+  ],
+
+  // Required for JsRunner to execute user code from the virtual filesystem
+  "unsafe": {
+    "bindings": [
+      { "name": "UNSAFE_EVAL", "type": "unsafe_eval" }
+    ]
+  }
 }

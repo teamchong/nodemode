@@ -13,8 +13,10 @@
 //   export default { fetch: createHandler() };
 
 export { Workspace } from "./workspace";
+export { ThreadDO } from "./thread-do";
 export { FsEngine, normalizePath } from "./fs-engine";
 export { ProcessManager } from "./process-manager";
+export { ContentCache } from "./content-cache";
 export { JsRunner } from "./js-runner";
 export { createHandler } from "./handler";
 export { ValidationError, validatePath, validateCommand } from "./validate";

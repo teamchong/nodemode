@@ -7,9 +7,10 @@
 
 import type { Env } from "../src/env";
 import { Workspace } from "../src/workspace";
+import { ThreadDO } from "../src/thread-do";
 import { createHandler } from "../src/handler";
 
-export { Workspace };
+export { Workspace, ThreadDO };
 export type { Env };
 
 const handler = createHandler();

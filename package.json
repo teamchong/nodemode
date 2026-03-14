@@ -83,5 +83,8 @@
     "overrides": {
       "rollup": ">=4.58.0"
     }
+  },
+  "dependencies": {
+    "zerobuf": "^0.1.0"
   }
 }

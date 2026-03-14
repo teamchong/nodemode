@@ -824,6 +824,82 @@ describe("nodemode", () => {
     expect(result).toBeDefined();
   });
 
+  it("grep -n shows line numbers", async () => {
+    await writeFile("lines.txt", "alpha\nbeta\ngamma\nbeta again\n");
+    const result = await exec("grep -n beta lines.txt");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("2:beta\n4:beta again\n");
+  });
+
+  it("grep -r searches recursively", async () => {
+    await writeFile("rdir/a.txt", "hello world\nfoo bar\n");
+    await writeFile("rdir/sub/b.txt", "hello again\nbaz\n");
+    const result = await exec("grep -r hello rdir");
+    expect(result.exitCode).toBe(0);
+    const lines = result.stdout.trim().split("\n").sort();
+    expect(lines.length).toBe(2);
+    expect(lines[0]).toContain("hello");
+    expect(lines[1]).toContain("hello");
+    // Each line should have file:content format
+    for (const line of lines) {
+      expect(line).toContain(":");
+    }
+  });
+
+  it("grep -rl lists only matching filenames", async () => {
+    await writeFile("rdir2/x.txt", "target line\nother\n");
+    await writeFile("rdir2/y.txt", "no match here\n");
+    await writeFile("rdir2/z.txt", "another target\n");
+    const result = await exec("grep -rl target rdir2");
+    expect(result.exitCode).toBe(0);
+    const files = result.stdout.trim().split("\n").sort();
+    expect(files).toEqual(["x.txt", "z.txt"]);
+  });
+
+  it("grep -rn shows file:linenum:content", async () => {
+    await writeFile("rdir3/a.txt", "one\ntwo\nthree\n");
+    await writeFile("rdir3/b.txt", "four\ntwo again\n");
+    const result = await exec("grep -rn two rdir3");
+    expect(result.exitCode).toBe(0);
+    const lines = result.stdout.trim().split("\n").sort();
+    expect(lines.length).toBe(2);
+    // Each should be file:linenum:content
+    for (const line of lines) {
+      const parts = line.split(":");
+      expect(parts.length).toBeGreaterThanOrEqual(3);
+      expect(parseInt(parts[1], 10)).toBeGreaterThan(0);
+    }
+  });
+
+  it("redirect > writes stdout to file", async () => {
+    const result = await exec("echo hello world > output.txt");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe(""); // stdout goes to file
+    const { content } = await readFile("output.txt");
+    expect(content).toBe("hello world\n");
+  });
+
+  it("redirect >> appends to file", async () => {
+    await writeFile("append.txt", "line1\n");
+    const result = await exec("echo line2 >> append.txt");
+    expect(result.exitCode).toBe(0);
+    const { content } = await readFile("append.txt");
+    expect(content).toBe("line1\nline2\n");
+  });
+
+  it("redirect < reads stdin from file", async () => {
+    await writeFile("input.txt", "hello\nworld\nfoo\n");
+    const result = await exec("grep hello < input.txt");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("hello\n");
+  });
+
+  it("git without GITMODE binding returns config error", async () => {
+    const result = await exec("git status");
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("not configured");
+  });
+
   it("which with no args returns error", async () => {
     const result = await exec("which");
     expect(result.exitCode).toBe(1);
@@ -1550,6 +1626,307 @@ describe("nodemode", () => {
     const body = await reqRes.text();
     expect(body).toBe("Hello from GET /hello");
     expect(reqRes.headers.get("x-app")).toBe("nodemode");
+  });
+
+  // -- New Node.js modules --
+
+  describe("dns module", () => {
+    it("dns.getServers returns Cloudflare DNS", async () => {
+      await writeFile("dns-test.js", `
+        const dns = require("dns");
+        const servers = dns.getServers();
+        console.log(JSON.stringify(servers));
+      `);
+      const r = await exec("node dns-test.js");
+      expect(r.exitCode).toBe(0);
+      const servers = JSON.parse(r.stdout.trim());
+      expect(servers).toContain("1.1.1.1");
+    });
+
+    it("dns error constants are available", async () => {
+      await writeFile("dns-const.js", `
+        const dns = require("dns");
+        console.log(dns.NOTFOUND);
+        console.log(dns.SERVFAIL);
+      `);
+      const r = await exec("node dns-const.js");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("ENOTFOUND");
+      expect(r.stdout).toContain("ESERVFAIL");
+    });
+  });
+
+  describe("tty module", () => {
+    it("isatty returns false in Workers", async () => {
+      await writeFile("tty-test.js", `
+        const tty = require("tty");
+        console.log(tty.isatty());
+        const ws = new tty.WriteStream();
+        console.log(ws.columns);
+        console.log(ws.isTTY);
+      `);
+      const r = await exec("node tty-test.js");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("false");
+      expect(r.stdout).toContain("80");
+    });
+  });
+
+  describe("string_decoder module", () => {
+    it("decodes utf-8 bytes incrementally", async () => {
+      await writeFile("sd-test.js", `
+        const { StringDecoder } = require("string_decoder");
+        const decoder = new StringDecoder("utf8");
+        const buf = new TextEncoder().encode("hello world");
+        const result = decoder.write(buf);
+        console.log(result);
+        console.log(decoder.end());
+      `);
+      const r = await exec("node sd-test.js");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("hello world");
+    });
+  });
+
+  describe("zlib module", () => {
+    it("provides gzip, gunzip, deflate, inflate, and stream creators", async () => {
+      await writeFile("zlib-test.js", `
+        const zlib = require("zlib");
+        console.log(typeof zlib.gzip);
+        console.log(typeof zlib.gunzip);
+        console.log(typeof zlib.deflate);
+        console.log(typeof zlib.inflate);
+        console.log(typeof zlib.createGzip);
+        console.log(typeof zlib.createGunzip);
+        console.log(typeof zlib.deflateRaw);
+        console.log(typeof zlib.inflateRaw);
+      `);
+      const r = await exec("node zlib-test.js");
+      expect(r.exitCode).toBe(0);
+      const lines = r.stdout.trim().split("\n");
+      expect(lines.every((l: string) => l === "function")).toBe(true);
+      expect(lines.length).toBe(8);
+    });
+
+    it("zlib constants are available", async () => {
+      await writeFile("zlib-const.js", `
+        const zlib = require("zlib");
+        console.log(zlib.constants.Z_BEST_COMPRESSION);
+        console.log(zlib.constants.Z_NO_COMPRESSION);
+      `);
+      const r = await exec("node zlib-const.js");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("9");
+      expect(r.stdout).toContain("0");
+    });
+  });
+
+  describe("readline module", () => {
+    it("creates interface and processes lines", async () => {
+      await writeFile("rl-test.js", `
+        const readline = require("readline");
+        const { EventEmitter } = require("events");
+        const input = new EventEmitter();
+        const rl = readline.createInterface({ input });
+        const lines = [];
+        rl.on("line", (line) => lines.push(line));
+        rl.on("close", () => console.log(JSON.stringify(lines)));
+        input.emit("data", "hello\\nworld\\n");
+        input.emit("end");
+      `);
+      const r = await exec("node rl-test.js");
+      expect(r.exitCode).toBe(0);
+      const lines = JSON.parse(r.stdout.trim());
+      expect(lines).toEqual(["hello", "world"]);
+    });
+  });
+
+  describe("timers module", () => {
+    it("provides setTimeout and setImmediate", async () => {
+      await writeFile("timers-test.js", `
+        const timers = require("timers");
+        console.log(typeof timers.setTimeout);
+        console.log(typeof timers.setImmediate);
+        console.log(typeof timers.clearTimeout);
+        console.log(typeof timers.setInterval);
+      `);
+      const r = await exec("node timers-test.js");
+      expect(r.exitCode).toBe(0);
+      const lines = r.stdout.trim().split("\n");
+      expect(lines.every((l: string) => l === "function")).toBe(true);
+    });
+  });
+
+  describe("timers/promises module", () => {
+    it("exports scheduler and setTimeout", async () => {
+      await writeFile("timers-p-test.js", `
+        const tp = require("timers/promises");
+        console.log(typeof tp.setTimeout);
+        console.log(typeof tp.setImmediate);
+        console.log(typeof tp.scheduler.wait);
+        console.log(typeof tp.scheduler.yield);
+      `);
+      const r = await exec("node timers-p-test.js");
+      expect(r.exitCode).toBe(0);
+      const lines = r.stdout.trim().split("\n");
+      expect(lines.every((l: string) => l === "function")).toBe(true);
+    });
+  });
+
+  describe("perf_hooks module", () => {
+    it("performance.now returns a number", async () => {
+      await writeFile("perf-test.js", `
+        const { performance } = require("perf_hooks");
+        const now = performance.now();
+        console.log(typeof now);
+        console.log(now > 0);
+      `);
+      const r = await exec("node perf-test.js");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("number");
+      expect(r.stdout).toContain("true");
+    });
+  });
+
+  describe("vm module", () => {
+    it("runs code in new context", async () => {
+      await writeFile("vm-test.js", `
+        const vm = require("vm");
+        const result = vm.runInNewContext("x + y", { x: 10, y: 20 });
+        console.log(result);
+      `);
+      const r = await exec("node vm-test.js");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe("30");
+    });
+
+    it("Script class works", async () => {
+      await writeFile("vm-script.js", `
+        const vm = require("vm");
+        const script = new vm.Script("a * b");
+        const result = script.runInNewContext({ a: 5, b: 6 });
+        console.log(result);
+      `);
+      const r = await exec("node vm-script.js");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe("30");
+    });
+  });
+
+  describe("constants module", () => {
+    it("exports filesystem and signal constants", async () => {
+      await writeFile("const-test.js", `
+        const constants = require("constants");
+        console.log(constants.SIGTERM);
+        console.log(constants.O_RDONLY);
+        console.log(constants.ENOENT);
+      `);
+      const r = await exec("node const-test.js");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("15");
+      expect(r.stdout).toContain("0");
+      expect(r.stdout).toContain("2");
+    });
+  });
+
+  describe("punycode module", () => {
+    it("toASCII converts unicode domains", async () => {
+      await writeFile("puny-test.js", `
+        const punycode = require("punycode");
+        console.log(punycode.version);
+        const encoded = punycode.ucs2.encode([104, 101, 108, 108, 111]);
+        console.log(encoded);
+      `);
+      const r = await exec("node puny-test.js");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("2.3.1");
+      expect(r.stdout).toContain("hello");
+    });
+  });
+
+  describe("fs module enhancements", () => {
+    it("createReadStream emits data and end", async () => {
+      await writeFile("stream-read.js", `
+        const fs = require("fs");
+        const stream = fs.createReadStream("stream-read.js");
+        let data = "";
+        stream.on("data", (chunk) => {
+          data += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+        });
+        stream.on("end", () => {
+          console.log(data.includes("createReadStream"));
+        });
+      `);
+      const r = await exec("node stream-read.js");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe("true");
+    });
+
+    it("createWriteStream returns writable stream", async () => {
+      await writeFile("stream-write.js", `
+        const fs = require("fs");
+        const stream = fs.createWriteStream("written-by-stream.txt");
+        console.log(typeof stream.write);
+        console.log(typeof stream.end);
+        console.log(typeof stream.on);
+        console.log(stream.writable);
+      `);
+      const r = await exec("node stream-write.js");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("function");
+      expect(r.stdout).toContain("true");
+    });
+
+    it("realpathSync returns absolute path", async () => {
+      await writeFile("realpath-test.js", `
+        const fs = require("fs");
+        const result = fs.realpathSync("realpath-test.js");
+        console.log(result.startsWith("/"));
+      `);
+      const r = await exec("node realpath-test.js");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe("true");
+    });
+
+    it("fs.watch returns a watcher object", async () => {
+      await writeFile("watch-test.js", `
+        const fs = require("fs");
+        const watcher = fs.watch("watch-test.js");
+        console.log(typeof watcher.close);
+        watcher.close();
+      `);
+      const r = await exec("node watch-test.js");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe("function");
+    });
+
+    it("fs.appendFile is available", async () => {
+      await writeFile("append-test.js", `
+        const fs = require("fs");
+        console.log(typeof fs.appendFile);
+        console.log(typeof fs.promises.appendFile);
+        console.log(typeof fs.renameSync);
+        console.log(typeof fs.realpathSync);
+      `);
+      const r = await exec("node append-test.js");
+      expect(r.exitCode).toBe(0);
+      const lines = r.stdout.trim().split("\n");
+      expect(lines.every((l: string) => l === "function")).toBe(true);
+    });
+
+    it("fs.constants includes extended values", async () => {
+      await writeFile("fsconst-test.js", `
+        const fs = require("fs");
+        console.log(fs.constants.O_RDONLY);
+        console.log(fs.constants.S_IFREG);
+        console.log(fs.constants.O_CREAT);
+      `);
+      const r = await exec("node fsconst-test.js");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("0");
+      expect(r.stdout).toContain("32768");
+      expect(r.stdout).toContain("64");
+    });
   });
 
   it("invalid JSON returns 400 not 500", async () => {

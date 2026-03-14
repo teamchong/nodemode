@@ -1,7 +1,7 @@
-import { Workspace, createHandler } from "nodemode";
+import { Workspace, ThreadDO, createHandler } from "nodemode";
 import type { Env } from "nodemode";
 
-export { Workspace };
+export { Workspace, ThreadDO };
 
 const handler = createHandler();
 

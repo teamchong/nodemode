@@ -4,6 +4,7 @@
 //   R2 (FS_BUCKET)  — file content (blobs)
 //   DO SQLite       — directory index (path, size, mode, mtime)
 //                   — hot file cache (small files cached in SQLite for sub-ms reads)
+//   WASM Memory     — hot tier via zerobuf ContentCache (sub-μs, zero-copy views)
 //
 // R2 key structure:
 //   {workspace}/{path}  — file content
@@ -14,6 +15,7 @@
 //   readdir queries SQLite for direct children only (single-level prefix).
 
 import { validatePath } from "./validate";
+import { ContentCache } from "./content-cache";
 
 export interface FileStat {
   size: number;
@@ -31,14 +33,26 @@ const MAX_CACHE_FILE_SIZE = 64 * 1024; // Cache files smaller than 64KB in SQLit
 const MAX_CACHE_ENTRIES = 500; // Evict oldest entries beyond this count
 
 export class FsEngine {
+  private contentCache: ContentCache;
+
   constructor(
     private bucket: R2Bucket,
     private _sql: SqlStorage,
     private workspace: string,
-  ) {}
+  ) {
+    this.contentCache = new ContentCache();
+  }
 
   get sql(): SqlStorage {
     return this._sql;
+  }
+
+  get workspaceId(): string {
+    return this.workspace;
+  }
+
+  get cache(): ContentCache {
+    return this.contentCache;
   }
 
   // -- Read operations --
@@ -47,22 +61,36 @@ export class FsEngine {
     const normalized = normalizePath(path);
     validatePath(normalized);
 
-    // Check SQLite cache first (sub-ms)
+    // Hot tier: zerobuf WASM Memory (sub-μs, zero-copy view)
+    const hotCached = this.contentCache.get(normalized);
+    if (hotCached) {
+      // Return a copy — the view points into WASM memory which may be
+      // invalidated by arena growth. Callers that mutate need their own copy.
+      return new Uint8Array(hotCached);
+    }
+
+    // Warm tier: SQLite cache (sub-ms)
     const cached = this.sql
       .exec("SELECT data FROM file_cache WHERE path = ?", normalized)
       .toArray();
     if (cached.length > 0) {
-      return new Uint8Array(cached[0].data as ArrayBuffer);
+      const data = new Uint8Array(cached[0].data as ArrayBuffer);
+      // Promote to hot cache
+      this.contentCache.put(normalized, data);
+      return data;
     }
 
-    // Fall back to R2 (~10-50ms)
+    // Cold tier: R2 (~10-50ms)
     const key = this.r2Key(normalized);
     const obj = await this.bucket.get(key);
     if (!obj) return null;
 
     const data = new Uint8Array(await obj.arrayBuffer());
 
-    // Cache small files in SQLite for next read
+    // Populate hot cache (WASM memory)
+    this.contentCache.put(normalized, data);
+
+    // Populate warm cache (SQLite) for small files
     if (data.byteLength <= MAX_CACHE_FILE_SIZE) {
       this.sql.exec(
         "INSERT OR REPLACE INTO file_cache (path, data, cached_at) VALUES (?, ?, ?)",
@@ -130,7 +158,11 @@ export class FsEngine {
       now,
     );
 
-    // Update cache if small enough
+    // Invalidate hot cache, then re-populate with new content
+    this.contentCache.invalidate(normalized);
+    this.contentCache.put(normalized, bytes);
+
+    // Update warm cache if small enough
     if (bytes.byteLength <= MAX_CACHE_FILE_SIZE) {
       this.sql.exec(
         "INSERT OR REPLACE INTO file_cache (path, data, cached_at) VALUES (?, ?, ?)",
@@ -177,6 +209,7 @@ export class FsEngine {
     await this.bucket.delete(key);
     this.sql.exec("DELETE FROM files WHERE path = ?", normalized);
     this.sql.exec("DELETE FROM file_cache WHERE path = ?", normalized);
+    this.contentCache.invalidate(normalized);
   }
 
   async rmdir(path: string, recursive: boolean = false): Promise<void> {
@@ -220,6 +253,8 @@ export class FsEngine {
         normalized,
         escaped + "/%",
       );
+      // Clear hot cache — arena is append-only, can't selectively free
+      this.contentCache.clear();
     } else {
       // Check if empty — only look at direct children
       const children = this.sql
@@ -438,6 +473,8 @@ export class FsEngine {
       oldNorm,
       escapedOld + "/%",
     );
+    // Invalidate hot cache for moved paths
+    this.contentCache.clear();
   }
 
   // -- Internal helpers --

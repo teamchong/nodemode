@@ -13,7 +13,8 @@
 //   { "allow": ["git", "npm", "node"], "deny": ["sudo", "rm -rf"] }
 
 import type { FsEngine } from "./fs-engine";
-import type { UnsafeEval } from "./env";
+import { normalizePath } from "./fs-engine";
+import type { UnsafeEval, Env } from "./env";
 import { JsRunner } from "./js-runner";
 import { validateCommand } from "./validate";
 
@@ -77,6 +78,7 @@ const BUILTIN_COMMANDS = new Set([
   "whoami",
   "date",
   "sleep",
+  "git",
 ]);
 
 type ContainerExecFn = (
@@ -94,7 +96,14 @@ export class ProcessManager {
     private cwd: string = "/",
     private containerExec?: ContainerExecFn,
     private unsafeEval?: UnsafeEval,
+    private gitmode?: DurableObjectNamespace,
+    private threadDO?: DurableObjectNamespace,
   ) {}
+
+  /** Expose THREAD_DO binding so JsRunner can fan out worker_threads to child DOs. */
+  get threadBinding(): DurableObjectNamespace | undefined {
+    return this.threadDO;
+  }
 
   // Returns the persistent JsRunner instance (created on first use).
   // Keeps the active http.Server across exec calls so Workspace can
@@ -193,30 +202,64 @@ export class ProcessManager {
   }
 
   private async execSingle(command: string, options: SpawnOptions): Promise<SpawnResult> {
-    const { cmd, args } = parseCommand(command);
-    const effectiveCwd = options.cwd || this.cwd;
+    // Extract shell redirects before parsing command
+    const { cleanCommand, redirects } = extractRedirects(command);
+
+    // Handle input redirect: cmd < file
+    let effectiveOptions = options;
+    if (redirects.inputFile) {
+      const effectiveCwd = options.cwd || this.cwd;
+      const inputPath = resolvePath(effectiveCwd, redirects.inputFile);
+      const content = await this.fs.readFileText(inputPath);
+      if (content === null) {
+        return fail(`${redirects.inputFile}: No such file or directory\n`);
+      }
+      effectiveOptions = { ...options, stdin: content };
+    }
+
+    const { cmd, args } = parseCommand(cleanCommand);
+    const effectiveCwd = effectiveOptions.cwd || this.cwd;
+
+    let result: SpawnResult;
 
     // Tier 1: Shell builtins — DO, $0, <1ms
     if (BUILTIN_COMMANDS.has(cmd)) {
-      return this.execBuiltin(cmd, args, effectiveCwd, options);
+      result = await this.execBuiltin(cmd, args, effectiveCwd, effectiveOptions);
     }
-
     // Tier 2: JS execution — DO, $0, ~ms
-    const jsResult = await this.tryJsExec(cmd, args, effectiveCwd, options);
-    if (jsResult) return jsResult;
-
-    // Tier 3: Container — last resort, native binaries only
-    if (this.containerExec) {
-      return this.containerExec(command, {
-        cwd: effectiveCwd,
-        env: options.env,
-      });
+    else {
+      const jsResult = await this.tryJsExec(cmd, args, effectiveCwd, effectiveOptions);
+      if (jsResult) {
+        result = jsResult;
+      }
+      // Tier 3: Container — last resort, native binaries only
+      else if (this.containerExec) {
+        result = await this.containerExec(command, {
+          cwd: effectiveCwd,
+          env: effectiveOptions.env,
+        });
+      } else {
+        result = {
+          exitCode: 127,
+          stdout: "",
+          stderr: `nodemode: command not found: ${cmd}\nBuilt-in commands: ${[...BUILTIN_COMMANDS].join(", ")}`,
+        };
+      }
     }
-    return {
-      exitCode: 127,
-      stdout: "",
-      stderr: `nodemode: command not found: ${cmd}\nBuilt-in commands: ${[...BUILTIN_COMMANDS].join(", ")}`,
-    };
+
+    // Handle output redirects: cmd > file, cmd >> file
+    if (redirects.outputFile && result.exitCode === 0) {
+      const outPath = resolvePath(effectiveCwd, redirects.outputFile);
+      if (redirects.append) {
+        await this.fs.appendFile(outPath, result.stdout);
+      } else {
+        await this.fs.writeFile(outPath, result.stdout);
+      }
+      // Stdout goes to file, not returned
+      result = { ...result, stdout: "" };
+    }
+
+    return result;
   }
 
   private async tryJsExec(
@@ -443,6 +486,8 @@ export class ProcessManager {
       case "sleep":
         // No-op in DO (we don't actually sleep)
         return ok("");
+      case "git":
+        return this.builtinGit(args, cwd);
 
       default:
         return {
@@ -582,8 +627,9 @@ export class ProcessManager {
   }
 
   private async builtinGrep(args: string[], cwd: string, options?: SpawnOptions): Promise<SpawnResult> {
-    // Simple grep: grep pattern [file]
-    // If no file, reads from stdin (piped input)
+    // grep [flags] pattern [file/dir]
+    // Supports: -i (case insensitive), -v (invert), -c (count), -n (line numbers),
+    //           -r (recursive), -l (files with matches only)
     const flags = args.filter((a) => a.startsWith("-")).join("");
     const nonFlags = args.filter((a) => !a.startsWith("-"));
     if (nonFlags.length < 1) {
@@ -593,12 +639,26 @@ export class ProcessManager {
     const caseInsensitive = flags.includes("i");
     const invert = flags.includes("v");
     const countOnly = flags.includes("c");
+    const showLineNumbers = flags.includes("n");
+    const recursive = flags.includes("r");
+    const filesOnly = flags.includes("l");
 
+    // Build the test function once
+    const test = this.buildGrepTest(pattern, caseInsensitive);
+
+    // Recursive mode: query SQLite index for all files, fan-out parallel R2 reads
+    if (recursive) {
+      const targetDir = nonFlags.length >= 2 ? resolvePath(cwd, nonFlags[1]) : cwd;
+      return this.grepRecursive(targetDir, test, invert, countOnly, showLineNumbers, filesOnly);
+    }
+
+    // Single-file or stdin mode
     let content: string;
+    let filePath: string | undefined;
     if (nonFlags.length >= 2) {
       const file = nonFlags[1];
-      const path = resolvePath(cwd, file);
-      const fileContent = await this.fs.readFileText(path);
+      filePath = resolvePath(cwd, file);
+      const fileContent = await this.fs.readFileText(filePath);
       if (fileContent === null) return fail(`grep: ${file}: No such file or directory\n`);
       content = fileContent;
     } else if (options?.stdin) {
@@ -607,24 +667,134 @@ export class ProcessManager {
       return fail(""); // No file and no stdin — no matches
     }
 
-    let test: (line: string) => boolean;
+    const result = this.grepContent(content, test, invert, countOnly, showLineNumbers);
+    if (result === null) return fail("");
+    return ok(result);
+  }
+
+  private buildGrepTest(pattern: string, caseInsensitive: boolean): (line: string) => boolean {
     // Reject patterns with nested quantifiers that cause catastrophic backtracking (ReDoS)
-    // e.g. (a+)+, (a*)+, (a+)*, (a|b+)+ — group with quantifier containing inner quantifier
     const isSafeRegex = !/\([^)]*[+*][^)]*\)[+*{]/.test(pattern) && pattern.length <= 1024;
     try {
       if (!isSafeRegex) throw new Error("unsafe pattern");
       const regex = new RegExp(pattern, caseInsensitive ? "i" : "");
-      test = (line) => regex.test(line);
+      return (line) => regex.test(line);
     } catch {
-      test = caseInsensitive
+      return caseInsensitive
         ? (line) => line.toLowerCase().includes(pattern.toLowerCase())
         : (line) => line.includes(pattern);
     }
+  }
+
+  /** Search content, return formatted output or null for no matches */
+  private grepContent(
+    content: string, test: (line: string) => boolean,
+    invert: boolean, countOnly: boolean, showLineNumbers: boolean,
+  ): string | null {
     const lines = content.endsWith("\n") ? content.slice(0, -1).split("\n") : content.split("\n");
-    const matches = lines.filter((line) => invert ? !test(line) : test(line));
-    if (matches.length === 0) return fail("");
-    if (countOnly) return ok(`${matches.length}\n`);
-    return ok(matches.join("\n") + "\n");
+    const matchIndices: number[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (invert ? !test(lines[i]) : test(lines[i])) matchIndices.push(i);
+    }
+    if (matchIndices.length === 0) return null;
+    if (countOnly) return `${matchIndices.length}\n`;
+    if (showLineNumbers) {
+      return matchIndices.map((i) => `${i + 1}:${lines[i]}`).join("\n") + "\n";
+    }
+    return matchIndices.map((i) => lines[i]).join("\n") + "\n";
+  }
+
+  /** Recursive grep: SQLite index for file discovery, parallel R2 reads for content */
+  private async grepRecursive(
+    dir: string, test: (line: string) => boolean,
+    invert: boolean, countOnly: boolean, showLineNumbers: boolean, filesOnly: boolean,
+  ): Promise<SpawnResult> {
+    // Query all non-directory files under dir from SQLite index
+    const normalizedDir = normalizePath(dir);
+    const prefix = normalizedDir ? normalizedDir + "/" : "";
+    const sql = this.fs.sql;
+
+    // Get all file paths (non-directory) under this prefix
+    const rows = prefix
+      ? sql.exec(
+          "SELECT path FROM files WHERE path LIKE ? ESCAPE '\\' AND is_dir = 0",
+          prefix.replace(/[%_\\]/g, "\\$&") + "%",
+        ).toArray()
+      : sql.exec("SELECT path FROM files WHERE is_dir = 0").toArray();
+
+    const filePaths = rows.map((r) => r.path as string).sort();
+    if (filePaths.length === 0) return fail("");
+
+    // Fan-out parallel R2 reads (batch to avoid overwhelming)
+    const BATCH_SIZE = 50;
+    const output: string[] = [];
+
+    for (let i = 0; i < filePaths.length; i += BATCH_SIZE) {
+      const batch = filePaths.slice(i, i + BATCH_SIZE);
+      const contents = await Promise.all(
+        batch.map((p) => this.fs.readFileText("/" + p).then((c) => ({ path: p, content: c }))),
+      );
+
+      for (const { path: filePath, content } of contents) {
+        if (content === null) continue;
+        // Compute relative path from dir for display
+        const displayPath = prefix && filePath.startsWith(prefix)
+          ? filePath.slice(prefix.length)
+          : filePath;
+
+        if (filesOnly) {
+          // -l: just check if any line matches
+          const lines = content.endsWith("\n") ? content.slice(0, -1).split("\n") : content.split("\n");
+          const hasMatch = lines.some((line) => invert ? !test(line) : test(line));
+          if (hasMatch) output.push(displayPath);
+          continue;
+        }
+
+        const result = this.grepContent(content, test, invert, countOnly, showLineNumbers);
+        if (result === null) continue;
+
+        // Prefix each line with the filename
+        const resultLines = result.endsWith("\n") ? result.slice(0, -1).split("\n") : result.split("\n");
+        for (const line of resultLines) {
+          output.push(`${displayPath}:${line}`);
+        }
+      }
+    }
+
+    if (output.length === 0) return fail("");
+    return ok(output.join("\n") + "\n");
+  }
+
+  private async builtinGit(args: string[], cwd: string): Promise<SpawnResult> {
+    if (!this.gitmode) {
+      return fail("git: not configured — add GITMODE binding to wrangler.jsonc\n");
+    }
+
+    const subcommand = args[0];
+    if (!subcommand) {
+      return fail("usage: git <command> [<args>]\n");
+    }
+
+    try {
+      const id = this.gitmode.idFromName(cwd === "/" ? "default" : cwd);
+      const gitDO = this.gitmode.get(id);
+      const response = await gitDO.fetch("http://gitmode/exec", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ args, cwd }),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        return fail(`git: ${text}\n`);
+      }
+
+      const result = (await response.json()) as { stdout: string; stderr: string; exitCode: number };
+      return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return fail(`git: ${msg}\n`);
+    }
   }
 
   private builtinMkdir(args: string[], cwd: string): SpawnResult {
@@ -921,6 +1091,42 @@ function formatMode(mode: number): string {
     result += (m & (1 << i)) ? ch : "-";
   }
   return result;
+}
+
+interface RedirectInfo {
+  outputFile?: string;
+  inputFile?: string;
+  append: boolean;
+}
+
+function extractRedirects(command: string): { cleanCommand: string; redirects: RedirectInfo } {
+  const redirects: RedirectInfo = { append: false };
+  let clean = command;
+
+  // >> file (append)
+  const appendMatch = clean.match(/\s*>>\s*(\S+)\s*$/);
+  if (appendMatch) {
+    redirects.outputFile = appendMatch[1];
+    redirects.append = true;
+    clean = clean.slice(0, appendMatch.index).trimEnd();
+  } else {
+    // > file (overwrite) — but not >>
+    const writeMatch = clean.match(/\s*>\s*(\S+)\s*$/);
+    if (writeMatch) {
+      redirects.outputFile = writeMatch[1];
+      clean = clean.slice(0, writeMatch.index).trimEnd();
+    }
+  }
+
+  // < file (input)
+  const inputMatch = clean.match(/\s*<\s*(\S+)/);
+  if (inputMatch) {
+    redirects.inputFile = inputMatch[1];
+    clean = clean.slice(0, inputMatch.index) + clean.slice(inputMatch.index! + inputMatch[0].length);
+    clean = clean.trim();
+  }
+
+  return { cleanCommand: clean, redirects };
 }
 
 function resolvePath(cwd: string, path: string): string {

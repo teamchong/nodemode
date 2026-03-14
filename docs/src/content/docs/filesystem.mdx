@@ -1,29 +1,75 @@
 ---
 title: Filesystem (fs)
-description: R2-backed filesystem with SQLite directory index
+description: R2-backed filesystem with three-tier cache (WASM + SQLite + R2)
 ---
 
 ## Overview
 
-nodemode's `FsEngine` maps Node.js `fs` operations to R2 (file content) + DO SQLite (directory index and cache).
+nodemode's `FsEngine` maps Node.js `fs` operations to a three-tier storage stack: zerobuf WASM Memory (hot) → DO SQLite (warm) → R2 (cold).
 
 ## Supported Operations
 
 | Node.js fs | nodemode | Backing |
 |-----------|----------|---------|
-| `readFile` | `fs.readFile(path)` | SQLite cache → R2 fallback |
+| `readFile` | `fs.readFile(path)` | WASM cache → SQLite cache → R2 |
 | `readFile` (stream) | `fs.readFileStream(path)` | R2 streaming body |
-| `writeFile` | `fs.writeFile(path, data)` | R2 put + SQLite index |
+| `writeFile` | `fs.writeFile(path, data)` | R2 put + SQLite index + caches |
 | `appendFile` | `fs.appendFile(path, data)` | Read + concat + write |
-| `unlink` | `fs.unlink(path)` | R2 delete + SQLite delete |
+| `unlink` | `fs.unlink(path)` | R2 delete + SQLite delete + cache invalidate |
 | `stat` | `fs.stat(path)` | SQLite lookup |
 | `exists` | `fs.exists(path)` | SQLite lookup |
 | `readdir` | `fs.readdir(path)` | SQLite prefix query |
 | `mkdir` | `fs.mkdir(path, recursive?)` | SQLite directory marker |
-| `rmdir` | `fs.rmdir(path, recursive?)` | R2 batch delete + SQLite |
-| `rename` | `fs.rename(old, new)` | R2 copy+delete + SQLite |
+| `rmdir` | `fs.rmdir(path, recursive?)` | R2 batch delete + SQLite + cache clear |
+| `rename` | `fs.rename(old, new)` | R2 copy+delete + SQLite + cache clear |
 | `chmod` | `fs.chmod(path, mode)` | SQLite update |
 | `touch` | `fs.touch(path)` | SQLite mtime update |
+
+## Three-tier Caching
+
+```
+┌──────────────────────────────────────────────────────┐
+│ Hot:  zerobuf WASM Memory    (sub-μs, zero-copy)     │
+│       Arena allocator in WebAssembly.Memory          │
+│       32MB budget, Uint8Array views into WASM        │
+│       Survives across requests, lost on DO eviction  │
+├──────────────────────────────────────────────────────┤
+│ Warm: SQLite file_cache      (<1ms, persistent)      │
+│       Files < 64KB, max 500 entries                  │
+│       Survives DO hibernation/eviction               │
+├──────────────────────────────────────────────────────┤
+│ Cold: R2                     (10-50ms, durable)      │
+│       Unlimited storage, $0.015/GB/month             │
+│       Global distribution                            │
+└──────────────────────────────────────────────────────┘
+```
+
+### How it works
+
+**Reads** check hot → warm → cold, promoting upward on miss:
+1. Check zerobuf WASM Memory — return zero-copy `Uint8Array` view (sub-μs)
+2. Check SQLite `file_cache` — copy to JS, promote to hot cache (&lt;1ms)
+3. Fetch from R2 — populate both hot and warm caches (10-50ms)
+
+**Writes** invalidate + re-populate:
+1. Write to R2 (durable)
+2. Invalidate old hot cache entry, store new content in WASM arena
+3. Update SQLite warm cache (if file &lt; 64KB)
+
+**Deletes** invalidate all tiers:
+1. Delete from R2
+2. Remove from SQLite index and cache
+3. Invalidate hot cache entry
+
+### zerobuf integration
+
+The hot tier uses [zerobuf](https://www.npmjs.com/package/zerobuf)'s Arena allocator over `WebAssembly.Memory`:
+- `Arena.allocBytes(data)` stores file content directly in WASM linear memory
+- Reads return `Uint8Array` views pointing into WASM memory — **no copies**
+- Arena is append-only with save/restore checkpoints
+- Automatic memory growth (doubling strategy, up to 32MB)
+
+This eliminates the `ArrayBuffer → Uint8Array → TextDecoder` copy chain for cached files. For `grep -r` scanning many files, content is already in memory from the first read.
 
 ## REST API
 
@@ -58,7 +104,7 @@ Content-Type: application/json
 {"path": "large-file.bin", "stream": true}
 ```
 
-Returns raw `application/octet-stream` body directly from R2 (bypasses SQLite cache).
+Returns raw `application/octet-stream` body directly from R2 (bypasses caches).
 
 ### Stat a file
 
@@ -105,6 +151,15 @@ Content-Type: application/json
 {"path": "src/old.ts"}
 ```
 
+### Remove directory
+
+```
+POST /workspace/{id}/fs/rmdir
+Content-Type: application/json
+
+{"path": "src/old", "recursive": true}
+```
+
 ### Rename a file or directory
 
 ```
@@ -123,16 +178,6 @@ GET /workspace/{id}/fs/exists?path=src/index.ts
 ```
 
 Response: `{"exists": true}`
-
-## Caching Strategy
-
-Files smaller than **64KB** are cached in DO SQLite after the first R2 read. Subsequent reads hit SQLite (&lt;1ms) instead of R2 (10-50ms).
-
-- Cache is **updated** on write (file content stored in cache)
-- Cache is **evicted** on delete
-- Cache is **evicted** when file grows above 64KB
-- Max **500 cached entries** — oldest evicted when exceeded
-- Cache is **invalidated** when container sends index invalidation
 
 ## R2 Key Structure
 

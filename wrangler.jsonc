@@ -23,12 +23,17 @@
           "image": "./container/Dockerfile",
           "max_instances": 10
         }
+      },
+      {
+        "name": "THREAD_DO",
+        "class_name": "ThreadDO"
       }
     ]
   },
 
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["Workspace"] }
+    { "tag": "v1", "new_sqlite_classes": ["Workspace"] },
+    { "tag": "v2", "new_sqlite_classes": ["ThreadDO"] }
   ],
 
   // UnsafeEval binding — required for JsRunner to execute JS from virtual fs

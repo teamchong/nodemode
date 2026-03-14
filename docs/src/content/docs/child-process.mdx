@@ -1,16 +1,17 @@
 ---
 title: Child Process
-description: Tiered command execution — built-in emulators + Containers + shell parsing
+description: Three-tier command execution — builtins + JsRunner + Containers
 ---
 
 ## Overview
 
-nodemode's `ProcessManager` maps `child_process.exec()` to a tiered execution model:
+nodemode's `ProcessManager` maps `child_process.exec()` to a three-tier execution model:
 
-1. **Built-in emulators** — 24 common commands run directly in the DO ($0, &lt;1ms)
-2. **Cloudflare Containers** — heavy commands run in real Linux via `ctx.container`
+1. **Tier 1: Shell builtins** — 24 common commands run directly in the DO ($0, &lt;1ms)
+2. **Tier 2: JsRunner** — JS/TS execution in the DO's V8 isolate ($0, ~ms)
+3. **Tier 3: Container** — native binaries in real Linux via `ctx.container`
 
-## Built-in Commands
+## Tier 1: Built-in Commands
 
 These execute in the DO with zero cost and sub-millisecond latency:
 
@@ -24,7 +25,7 @@ These execute in the DO with zero cost and sub-millisecond latency:
 | `head -n N` | First N lines (file or stdin) |
 | `tail -n N` | Last N lines (file or stdin) |
 | `wc` | Word/line/byte count (file or stdin) |
-| `grep` / `grep -i` | Pattern search (file or stdin, regex or literal) |
+| `grep` | Pattern search with `-r` `-n` `-l` `-i` `-v` `-c` flags |
 | `mkdir` / `mkdir -p` | Create directories |
 | `rm` / `rm -rf` | Remove files/directories |
 | `cp` | Copy files |
@@ -34,10 +35,88 @@ These execute in the DO with zero cost and sub-millisecond latency:
 | `which` | Locate command (reports builtins) |
 | `whoami` | Current user |
 | `date` | Current date/time (ISO 8601) |
-| `test` | File/string tests (`-f`, `-d`, `-e`, `-z`, `-n`) |
+| `test` | File/string/numeric tests (`-f`, `-d`, `-e`, `-z`, `-n`, `-s`, `-eq`, `-lt`, etc.) |
 | `true` / `false` | Exit 0 / exit 1 |
 | `printf` | Formatted output |
 | `sleep` | No-op (returns immediately in DO) |
+
+### grep flags
+
+| Flag | Description |
+|------|------------|
+| `-r` | Recursive search — SQLite index for file discovery, parallel R2 reads |
+| `-n` | Show line numbers (`linenum:content` or `file:linenum:content`) |
+| `-l` | List only filenames with matches |
+| `-i` | Case insensitive |
+| `-v` | Invert match |
+| `-c` | Count matches |
+
+Recursive grep (`-r`) uses the SQLite file index for O(1) file discovery, then fans out parallel reads from the three-tier cache (zerobuf WASM → SQLite → R2). Unsafe regex patterns (nested quantifiers) automatically fall back to literal string matching.
+
+## Tier 2: JsRunner
+
+Commands like `node script.js`, `./script.js`, and `npx tool` execute JavaScript and TypeScript directly in the DO's V8 isolate:
+
+```bash
+# All of these run in-DO via JsRunner, no container needed
+node server.js
+node -e "console.log(1 + 2)"
+node -p "Math.PI"
+./my-script.js
+npx my-tool
+```
+
+### Module system
+
+- **CommonJS**: `require()` with circular dependency handling
+- **ESM**: `import/export` auto-converted to CJS at load time
+- **TypeScript**: Type annotations stripped (no tsc needed)
+- **JSON imports**: `require('./package.json')` works
+- **Relative resolution**: `./module`, `../module`, `./module.js`, `./module/index.js`
+
+### Node.js builtins available in JsRunner
+
+| Module | What works |
+|--------|-----------|
+| `fs` | `readFileSync`, `writeFileSync`, `existsSync`, `mkdirSync`, `readdirSync`, `statSync` — backed by FsEngine |
+| `path` | `join`, `resolve`, `dirname`, `basename`, `extname`, `relative`, `isAbsolute`, `sep`, `parse`, `format`, `normalize` |
+| `crypto` | `createHash` (md5, sha1, sha256, sha512) |
+| `http` | `createServer` (callback fires), `request` (backed by fetch), `get` |
+| `https` | Alias for http |
+| `net` | `isIP`, `isIPv4`, `isIPv6`, `Socket` (emits honest errors) |
+| `worker_threads` | `Worker`, `isMainThread`, `parentPort`, `workerData`, `postMessage` |
+| `stream` | `Readable`, `Writable`, `Transform`, `PassThrough`, `pipeline`, `finished` |
+| `child_process` | `exec` (calls back into ProcessManager) |
+
+### worker_threads
+
+Workers are real isolated JsRunner instances with separate module caches:
+
+```javascript
+// main.js
+const { Worker } = require("worker_threads");
+const w = new Worker("./worker.js", { workerData: { n: 42 } });
+w.on("message", (msg) => console.log(msg)); // { result: 84 }
+
+// worker.js
+const { parentPort, workerData } = require("worker_threads");
+parentPort.postMessage({ result: workerData.n * 2 });
+```
+
+Messages are cloned via structured clone (`JSON.parse(JSON.stringify())`) — no shared memory.
+
+### http.request()
+
+Real HTTP requests backed by `fetch()`:
+
+```javascript
+const http = require("http");
+const req = http.request({ hostname: "api.example.com", path: "/data" }, (res) => {
+  res.on("data", (chunk) => console.log(chunk));
+  res.on("end", () => console.log("done"));
+});
+req.end();
+```
 
 ## Shell Support
 
@@ -79,13 +158,13 @@ echo 'single quoted'
 grep "multi word pattern" file.txt
 ```
 
-## Container Execution
+## Tier 3: Container Execution
 
-Commands not in the built-in set (npm, node, git, tsc, esbuild, python, cargo, etc.) are routed to a Cloudflare Container:
+Commands not handled by Tier 1 or Tier 2 (npm, git, tsc, python, cargo, etc.) are routed to a Cloudflare Container:
 
 ```
 Workspace DO receives "npm install"
-    → Not a built-in command
+    → Not a built-in, not JS
     → Start container if not running (ctx.container.start())
     → Wait for container ready (ctx.container.monitor())
     → getTcpPort(8080).fetch("/exec") to container-agent
@@ -96,36 +175,16 @@ Workspace DO receives "npm install"
 
 ### Container Lifecycle
 
-- **Boot on demand** — container starts on first non-builtin exec
+- **Boot on demand** — container starts on first Tier 3 command
 - **R2 FUSE mount** — source files available at `/mnt/workspace`, symlinked into `/workspace`
 - **Local build artifacts** — `node_modules`, `dist`, `.npm`, `.next`, `build` on fast local disk
 - **Snapshot/restore** — SIGTERM triggers tar+zstd of build dirs to R2, restored on next boot
 - **Inactivity timeout** — 10 min idle via `setInactivityTimeout()`, container sleeps
 - **Health checks** — DO alarm every 30s pings `/healthz` and reconciles R2 index
-- **Index invalidation** — container POSTs `/index-invalidate` when files change via FUSE
-
-### Container Config
-
-In `wrangler.jsonc`:
-
-```jsonc
-{
-  "durable_objects": {
-    "bindings": [{
-      "name": "WORKSPACE",
-      "class_name": "Workspace",
-      "container": {
-        "image": "./container/Dockerfile",
-        "max_instances": 10
-      }
-    }]
-  }
-}
-```
 
 ### Exit Code 127
 
-If no container is available (local dev, test environment), non-builtin commands return exit code 127 with a "command not found" message. This is expected — builtins work everywhere, containers work in production.
+If no container is available (local dev, test environment), non-builtin non-JS commands return exit code 127 with a "command not found" message. Builtins and JsRunner work everywhere; containers work in production.
 
 ## REST API
 
