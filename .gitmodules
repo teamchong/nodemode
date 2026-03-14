@@ -1,3 +1,6 @@
 [submodule "vendor/gitmode"]
 	path = vendor/gitmode
 	url = git@github.com:teamchong/gitmode.git
+[submodule "vendor/zerobuf"]
+	path = vendor/zerobuf
+	url = https://github.com/teamchong/zerobuf.git

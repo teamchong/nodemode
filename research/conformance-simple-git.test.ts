@@ -36,11 +36,9 @@ describe("simple-git conformance", () => {
   // =====================================================================
 
   describe("repo initialization", () => {
-    it("git is a builtin that delegates to GITMODE binding", async () => {
-      // Without GITMODE binding configured, git returns an error
+    it("git init runs via in-process GitPorcelain", async () => {
       const result = await exec("git init myrepo");
-      expect(result.exitCode).toBe(1);
-      expect(result.stderr).toContain("not configured");
+      expect(result.exitCode).toBe(0);
     });
 
     it("can simulate repo structure with fs primitives", async () => {

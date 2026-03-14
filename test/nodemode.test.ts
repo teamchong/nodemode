@@ -894,10 +894,9 @@ describe("nodemode", () => {
     expect(result.stdout).toBe("hello\n");
   });
 
-  it("git without GITMODE binding returns config error", async () => {
+  it("git status runs via in-process GitPorcelain", async () => {
     const result = await exec("git status");
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("not configured");
+    expect(result.exitCode).toBe(0);
   });
 
   it("which with no args returns error", async () => {

@@ -24,7 +24,6 @@ export interface CommandExecutor {
 }
 import type { UnsafeEval } from "./env";
 // Workers with nodejs_compat provide node:crypto with synchronous createHash
-// @ts-expect-error — node:crypto types not in @cloudflare/workers-types
 import * as nodeCrypto from "node:crypto";
 
 export interface RunResult {

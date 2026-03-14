@@ -51,6 +51,7 @@ export class Workspace extends DurableObject<Env> {
       env.UNSAFE_EVAL,
       env.GITMODE,
       env.THREAD_DO,
+      env.FS_BUCKET,
     );
 
     // Restore container status from live state after hibernation wake

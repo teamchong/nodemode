@@ -4,7 +4,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "lib": ["ES2022"],
-    "types": ["@cloudflare/workers-types"],
+    "types": ["@cloudflare/workers-types", "node"],
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
@@ -12,8 +12,14 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "allowImportingTsExtensions": true,
-    "outDir": "dist"
+    "outDir": "dist",
+    "paths": {
+      "gitmode/git-engine": ["./vendor/gitmode/src/git-engine.ts"],
+      "gitmode/git-porcelain": ["./vendor/gitmode/src/git-porcelain.ts"],
+      "gitmode/wasm-engine": ["./vendor/gitmode/src/wasm-engine.ts"],
+      "zerobuf": ["./vendor/zerobuf/src/index.ts"]
+    }
   },
-  "include": ["src", "worker"],
-  "exclude": ["node_modules", "src/deploy.ts", "vendor"]
+  "include": ["src", "worker", "vendor/gitmode/src", "vendor/zerobuf/src"],
+  "exclude": ["node_modules", "src/deploy.ts", "vendor/gitmode/test", "vendor/gitmode/src/worker.ts", "vendor/gitmode/src/pack-worker.ts", "vendor/gitmode/src/server.ts", "vendor/gitmode/src/index.ts", "vendor/zerobuf/src/index.test.ts", "vendor/zerobuf/src/index.bench.ts"]
 }
